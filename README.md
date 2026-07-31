@@ -6,16 +6,15 @@
 
 ## 当前状态
 
-当前是 **R0 工程基线**，用于让开发 Agent 从可重复验证的仓库状态开始工作。它已经提供：
+本轮交付 contract v1 第一版与不连接 Graphiti 的 Publication acceptance vertical slice：
 
-- Python / uv 工具链与锁文件；
-- 包结构、CLI 和项目边界声明；
-- 版本化 contract assets 与首个 capability handshake schema；
-- SQLite migration runner 与空数据根 smoke test；
-- Ruff、mypy、pytest 和 GitHub Actions；
-- R0 尚未完成事项的显式清单。
+- 13 个 versioned JSON Schema 与 valid/invalid fixtures；
+- OpenAPI 文档（`/health`、`/historian/publications`、`/memory/recall`、`/memory/expand`）；
+- Router bootstrap ledger migration（accepted publications、idempotency、receipts、evidence envelopes、ordered ingestion jobs）；
+- 确定性、原子、幂等的 Publication acceptance 服务与 stdlib HTTP surface；
+- health 明确返回 `bootstrap` / `degraded`，Graphiti 状态保持 `not_configured`。
 
-这不代表 Publication、Recall、Graphiti 或 reindex 能力已经实现，也不增加 Notion Roadmap 的已验收进度。
+仍未实现：真实 Graphiti/Neo4j ingestion、stable memoryRef、Recall/Expand 业务实现、reindex、备份恢复和 production lock。它们不会伪装为已完成。
 
 ## 本地开发
 
@@ -27,12 +26,6 @@ uvx ruff==0.15.22 format --check .
 uvx ruff==0.15.22 check .
 uvx mypy==2.3.0
 uv run --with pytest==9.1.1 --with jsonschema==4.26.0 pytest
-```
-
-验证 Graphiti 锁可解析：
-
-```bash
-uv run --isolated --with graphiti-core==0.29.2 python -c "from importlib.metadata import version; assert version('graphiti-core') == '0.29.2'"
 ```
 
 初始化空数据根：

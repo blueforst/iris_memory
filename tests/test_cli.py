@@ -9,11 +9,11 @@ def test_cli_migrate_then_check(tmp_path: Path, capsys: object) -> None:
 
     assert main(["migrate", "--data-root", str(data_root)]) == 0
     migrate_output = json.loads(capsys.readouterr().out)  # type: ignore[attr-defined]
-    assert migrate_output["appliedVersions"] == ["0001_bootstrap"]
+    assert migrate_output["appliedVersions"] == ["0001_bootstrap", "0002_router_ledger"]
 
     assert main(["check", "--data-root", str(data_root)]) == 0
     check_output = json.loads(capsys.readouterr().out)  # type: ignore[attr-defined]
     assert check_output["service"] == "iris-memory"
-    assert check_output["status"] == "bootstrap"
+    assert check_output["status"] == "degraded"
     assert check_output["databaseExists"] is True
-    assert check_output["capabilities"] == ["health.read"]
+    assert check_output["capabilities"] == ["health.read", "publication.accept"]
