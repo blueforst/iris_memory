@@ -1,0 +1,11 @@
+{
+  "package": "iris-memory-contracts",
+  "version": "0.1.0",
+  "status": "bootstrap",
+  "schemas": [
+    "schemas/capability-handshake-v1.schema.json"
+  ],
+  "fixtures": [
+    "fixtures/capability-handshake-v1.valid.json"
+  ]
+}

@@ -1,0 +1,50 @@
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "iris-memory"
+version = "0.0.0"
+description = "Independent long-term memory service for Iris."
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+authors = [{ name = "blueforst" }]
+dependencies = []
+
+[project.scripts]
+iris-memory = "iris_memory.cli:main"
+
+[tool.uv]
+required-version = ">=0.11.32,<0.12"
+
+[tool.hatch.build]
+include = [
+  "src/iris_memory/**/*.py",
+  "src/iris_memory/**/*.json",
+  "src/iris_memory/**/*.sql",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/iris_memory"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src"]
+warn_unreachable = true
