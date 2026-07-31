@@ -1,9 +1,9 @@
 """Helpers for reading packaged contract schemas and fixtures."""
 
+from collections.abc import Iterator
 from contextlib import contextmanager
 from importlib.resources import as_file, files
 from pathlib import Path
-from typing import Iterator
 
 
 @contextmanager
