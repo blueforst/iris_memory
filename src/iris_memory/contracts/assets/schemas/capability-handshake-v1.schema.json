@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:iris:memory:capability-handshake:v1",
   "title": "MemoryCapabilityHandshakeV1",
-  "description": "Bootstrap capability and contract-version handshake. It does not imply that Publication or Recall APIs are implemented.",
+  "description": "Bootstrap capability and contract-version handshake.",
   "type": "object",
   "additionalProperties": false,
   "required": ["service", "contractVersion", "status", "capabilities"],
@@ -12,7 +12,7 @@
     },
     "contractVersion": {
       "type": "string",
-      "pattern": "^0\\.1\\.[0-9]+$"
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
     },
     "status": {
       "enum": ["bootstrap", "not_ready", "ready", "degraded"]
