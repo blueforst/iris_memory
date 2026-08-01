@@ -3,7 +3,7 @@
   "info": {
     "title": "Iris Memory Contract v1",
     "version": "0.1.0",
-    "description": "Candidate cross-project wire contract owned by iris-memory."
+    "description": "Candidate descriptive OpenAPI surface for iris-memory contracts v0.1.0. The authoritative wire contract is the JSON Schema set declared in manifest.json; this document may drift and must not be treated as a second authoritative source."
   },
   "paths": {
     "/health": {

@@ -59,3 +59,11 @@ def test_openapi_asset_exists_and_parses() -> None:
         "/memory/recall",
         "/memory/expand",
     }
+
+
+def test_manifest_declares_json_schema_as_authoritative() -> None:
+    manifest = _manifest()
+    assert manifest["authority"]["schemas"] == "authoritative"
+    assert manifest["authority"]["openapi"] == "candidate_descriptive"
+    assert manifest["openapi"][0]["status"] == "candidate"
+    assert manifest["openapi"][0]["authority"] == "descriptive"

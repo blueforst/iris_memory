@@ -9,7 +9,7 @@
 本轮交付 contract v1 第一版与不连接 Graphiti 的 Publication acceptance vertical slice：
 
 - 13 个 versioned JSON Schema 与 valid/invalid fixtures；
-- OpenAPI 文档（`/health`、`/historian/publications`、`/memory/recall`、`/memory/expand`）；
+- OpenAPI 3.1 候选描述（`/health`、`/historian/publications`、`/memory/recall`、`/memory/expand`）；权威契约以 `manifest.json` 登记的 JSON Schema 为准，OpenAPI 不作为第二权威源；
 - Router bootstrap ledger migration（accepted publications、idempotency、receipts、evidence envelopes、ordered ingestion jobs）；
 - 确定性、原子、幂等的 Publication acceptance 服务与 stdlib HTTP surface；
 - health 明确返回 `bootstrap` / `degraded`，Graphiti 状态保持 `not_configured`。

@@ -2,6 +2,10 @@
   "package": "iris-memory-contracts",
   "version": "0.1.0",
   "status": "candidate_v1",
+  "authority": {
+    "schemas": "authoritative",
+    "openapi": "candidate_descriptive"
+  },
   "schemas": [
     "schemas/acceptance-receipt-v1.schema.json",
     "schemas/capability-handshake-v1.schema.json",
@@ -48,7 +52,11 @@
     "fixtures/unsupported-version-error-v1.invalid.json"
   ],
   "openapi": [
-    "openapi/iris-memory-v1.json"
+    {
+      "path": "openapi/iris-memory-v1.json",
+      "status": "candidate",
+      "authority": "descriptive"
+    }
   ],
   "owner": "blueforst/iris_memory"
 }
