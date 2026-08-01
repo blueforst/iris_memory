@@ -150,7 +150,7 @@ def test_source_sequence_conflict_returns_typed_error(tmp_path: Path) -> None:
     assert second.error["sourceSequence"] == 1
     assert _counts(database_path) == {
         "accepted_publications": 1,
-        "publication_idempotency": 1,
+        "publication_idempotency": 2,
         "acceptance_receipts": 1,
         "ingestion_jobs": 1,
     }
@@ -173,6 +173,85 @@ def test_same_publication_different_payload_uses_stored_idempotency_key(
     assert isinstance(first, Accepted)
     assert isinstance(conflict, IdempotencyConflict)
     assert conflict.error["idempotencyKey"] == "agent-original"
+    assert _counts(database_path) == {
+        "accepted_publications": 1,
+        "publication_idempotency": 2,
+        "acceptance_receipts": 1,
+        "ingestion_jobs": 1,
+    }
+
+
+def test_alternate_key_replay_is_consumed(tmp_path: Path) -> None:
+    database_path = tmp_path / "router.sqlite3"
+    first = accept_publication(database_path, _request(idempotency_key="agent-original"))
+    replay = accept_publication(database_path, _request(idempotency_key="agent-alternate"))
+
+    assert isinstance(first, Accepted)
+    assert isinstance(replay, DuplicateReplay)
+    assert replay.receipt["receiptId"] == first.receipt["receiptId"]
+
+    later = accept_publication(
+        database_path,
+        _request(
+            idempotency_key="agent-alternate",
+            publication=_publication(
+                publication_id="22222222-2222-4222-8222-222222222222",
+                source_sequence=2,
+                summary="different publication reusing consumed key",
+            ),
+        ),
+    )
+
+    assert isinstance(later, IdempotencyConflict)
+    assert later.error["publicationId"] == PUBLICATION_ID
+    assert later.error["expectedCanonicalPayloadHash"] == first.receipt["canonicalPayloadHash"]
+    assert _counts(database_path) == {
+        "accepted_publications": 1,
+        "publication_idempotency": 2,
+        "acceptance_receipts": 1,
+        "ingestion_jobs": 1,
+    }
+
+
+def test_alternate_key_conflict_is_consumed(tmp_path: Path) -> None:
+    database_path = tmp_path / "router.sqlite3"
+    first = accept_publication(database_path, _request(idempotency_key="agent-original"))
+    conflict = accept_publication(
+        database_path,
+        _request(
+            idempotency_key="agent-alternate",
+            publication=_publication(summary="different payload for same publication"),
+        ),
+    )
+
+    assert isinstance(first, Accepted)
+    assert isinstance(conflict, IdempotencyConflict)
+    assert conflict.error["idempotencyKey"] == "agent-original"
+
+    later = accept_publication(
+        database_path,
+        _request(
+            idempotency_key="agent-alternate",
+            publication=_publication(
+                publication_id="22222222-2222-4222-8222-222222222222",
+                source_sequence=2,
+                summary="different publication reusing consumed conflict key",
+            ),
+        ),
+    )
+
+    assert isinstance(later, IdempotencyConflict)
+    assert later.error["publicationId"] == PUBLICATION_ID
+    assert (
+        later.error["expectedCanonicalPayloadHash"]
+        == conflict.error["receivedCanonicalPayloadHash"]
+    )
+    assert _counts(database_path) == {
+        "accepted_publications": 1,
+        "publication_idempotency": 2,
+        "acceptance_receipts": 1,
+        "ingestion_jobs": 1,
+    }
 
 
 def test_non_canonical_semver_is_rejected(tmp_path: Path) -> None:

@@ -220,29 +220,37 @@ def accept_publication(database_path: Path, request: object) -> AcceptanceOutcom
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("BEGIN IMMEDIATE")
         try:
-            idempotency_row = connection.execute(
-                "SELECT publication_id, canonical_payload_hash, accepted_at "
-                "FROM publication_idempotency WHERE idempotency_key = ?",
-                (idempotency_key,),
-            ).fetchone()
-            if idempotency_row is not None:
-                existing_id = str(idempotency_row[0])
-                existing_hash = str(idempotency_row[1])
-                if existing_hash == canonical_hash:
-                    original = _load_stored_receipt(connection, existing_id)
-                    return DuplicateReplay(
-                        status="duplicate_replay",
-                        receipt=_build_duplicate_receipt(original),
+            accepted_at = datetime.now(UTC).isoformat()
+            inserted_key = connection.execute(
+                "INSERT OR IGNORE INTO publication_idempotency"
+                "(idempotency_key, publication_id, canonical_payload_hash, accepted_at) "
+                "VALUES (?, ?, ?, ?)",
+                (idempotency_key, publication_id, canonical_hash, accepted_at),
+            )
+            if inserted_key.rowcount == 0:
+                idempotency_row = connection.execute(
+                    "SELECT publication_id, canonical_payload_hash, accepted_at "
+                    "FROM publication_idempotency WHERE idempotency_key = ?",
+                    (idempotency_key,),
+                ).fetchone()
+                if idempotency_row is not None:
+                    existing_id = str(idempotency_row[0])
+                    existing_hash = str(idempotency_row[1])
+                    if existing_hash == canonical_hash:
+                        original = _load_stored_receipt(connection, existing_id)
+                        return DuplicateReplay(
+                            status="duplicate_replay",
+                            receipt=_build_duplicate_receipt(original),
+                        )
+                    return IdempotencyConflict(
+                        status="idempotency_conflict",
+                        error=_build_conflict_error(
+                            idempotency_key,
+                            existing_id,
+                            existing_hash,
+                            canonical_hash,
+                        ),
                     )
-                return IdempotencyConflict(
-                    status="idempotency_conflict",
-                    error=_build_conflict_error(
-                        idempotency_key,
-                        existing_id,
-                        existing_hash,
-                        canonical_hash,
-                    ),
-                )
 
             publication_row = connection.execute(
                 "SELECT canonical_payload_hash, receipt_id, accepted_at "
@@ -258,7 +266,8 @@ def accept_publication(database_path: Path, request: object) -> AcceptanceOutcom
                         receipt=_build_duplicate_receipt(original),
                     )
                 stored_key = connection.execute(
-                    "SELECT idempotency_key FROM publication_idempotency WHERE publication_id = ?",
+                    "SELECT idempotency_key FROM publication_idempotency "
+                    "WHERE publication_id = ? ORDER BY accepted_at ASC, rowid ASC LIMIT 1",
                     (publication_id,),
                 ).fetchone()
                 original_key = str(stored_key[0]) if stored_key is not None else idempotency_key
@@ -288,18 +297,11 @@ def accept_publication(database_path: Path, request: object) -> AcceptanceOutcom
                     ),
                 )
 
-            accepted_at = datetime.now(UTC).isoformat()
             receipt = _build_receipt(publication_id, canonical_hash, contract_version, accepted_at)
             receipt_json = json.dumps(receipt, ensure_ascii=False, sort_keys=True)
             payload_json = json.dumps(publication_dict, ensure_ascii=False, sort_keys=True)
             job_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"iris-memory:job:v1:{publication_id}"))
 
-            connection.execute(
-                "INSERT INTO publication_idempotency"
-                "(idempotency_key, publication_id, canonical_payload_hash, accepted_at) "
-                "VALUES (?, ?, ?, ?)",
-                (idempotency_key, publication_id, canonical_hash, accepted_at),
-            )
             connection.execute(
                 "INSERT INTO accepted_publications"
                 "(publication_id, contract_version, source_sequence, canonical_payload_hash, "
