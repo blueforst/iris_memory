@@ -1,11 +1,62 @@
 {
   "package": "iris-memory-contracts",
   "version": "0.1.0",
-  "status": "bootstrap",
+  "status": "candidate_v1",
+  "authority": {
+    "schemas": "authoritative",
+    "openapi": "candidate_descriptive"
+  },
   "schemas": [
-    "schemas/capability-handshake-v1.schema.json"
+    "schemas/acceptance-receipt-v1.schema.json",
+    "schemas/capability-handshake-v1.schema.json",
+    "schemas/duplicate-replay-receipt-v1.schema.json",
+    "schemas/expansion-request-v1.schema.json",
+    "schemas/expansion-response-v1.schema.json",
+    "schemas/health-response-v1.schema.json",
+    "schemas/historian-publication-v1.schema.json",
+    "schemas/idempotency-conflict-error-v1.schema.json",
+    "schemas/memory-recall-card-v1.schema.json",
+    "schemas/publication-acceptance-request-v1.schema.json",
+    "schemas/recall-request-v1.schema.json",
+    "schemas/sequence-conflict-error-v1.schema.json",
+    "schemas/unsupported-version-error-v1.schema.json"
   ],
   "fixtures": [
-    "fixtures/capability-handshake-v1.valid.json"
-  ]
+    "fixtures/acceptance-receipt-v1.valid.json",
+    "fixtures/acceptance-receipt-v1.invalid.json",
+    "fixtures/capability-handshake-v1.valid.json",
+    "fixtures/capability-handshake-v1.invalid.json",
+    "fixtures/capability-handshake-v1.invalid-semver.json",
+    "fixtures/duplicate-replay-receipt-v1.valid.json",
+    "fixtures/duplicate-replay-receipt-v1.invalid.json",
+    "fixtures/expansion-request-v1.valid.json",
+    "fixtures/expansion-request-v1.invalid.json",
+    "fixtures/expansion-response-v1.valid.json",
+    "fixtures/expansion-response-v1.invalid.json",
+    "fixtures/health-response-v1.valid.json",
+    "fixtures/health-response-v1.invalid.json",
+    "fixtures/historian-publication-v1.valid.json",
+    "fixtures/historian-publication-v1.invalid.json",
+    "fixtures/idempotency-conflict-error-v1.valid.json",
+    "fixtures/idempotency-conflict-error-v1.invalid.json",
+    "fixtures/memory-recall-card-v1.valid.json",
+    "fixtures/memory-recall-card-v1.invalid.json",
+    "fixtures/publication-acceptance-request-v1.valid.json",
+    "fixtures/publication-acceptance-request-v1.invalid.json",
+    "fixtures/publication-acceptance-request-v1.invalid-semver.json",
+    "fixtures/recall-request-v1.valid.json",
+    "fixtures/recall-request-v1.invalid.json",
+    "fixtures/sequence-conflict-error-v1.valid.json",
+    "fixtures/sequence-conflict-error-v1.invalid.json",
+    "fixtures/unsupported-version-error-v1.valid.json",
+    "fixtures/unsupported-version-error-v1.invalid.json"
+  ],
+  "openapi": [
+    {
+      "path": "openapi/iris-memory-v1.json",
+      "status": "candidate",
+      "authority": "descriptive"
+    }
+  ],
+  "owner": "blueforst/iris_memory"
 }

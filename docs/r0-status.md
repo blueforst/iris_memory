@@ -1,29 +1,26 @@
-# R0 工程基线状态
+# R0 / R1 Memory Contract Status
 
 本页只记录仓库内可验证的工程状态，不替代 Notion Roadmap。
 
-## 本基线已提供
+## 本轮已提供
 
-- Python 3.12–3.13 兼容范围与 uv 锁文件；
-- `iris_memory` 可安装包、CLI 与仓库边界声明；
-- contract assets 的版本化目录、manifest、JSON Schema 与 fixture；
-- SQLite migration runner、初始 migration 与空数据根 smoke test；
-- format、lint、typecheck、unit、contract、migration 检查；
-- Graphiti `0.29.2` 可选依赖锁解析检查；
-- Draft PR 模板与开发 Agent 契约。
+- `iris-memory-contracts@0.1.0` candidate：capability handshake、HistorianPublication、Publication acceptance request、acceptance/duplicate replay receipts、idempotency conflict、unsupported version、health、RecallRequest、MemoryRecallCard、Expansion request/response；
+- 每个 schema 均有 valid/invalid fixtures，且全部在 manifest 中登记；
+- OpenAPI 3.1 文档覆盖 health、publication、recall、expand 四个路径；该文档是 candidate/descriptive 描述，权威契约始终是 `manifest.json` 中登记的 JSON Schema，禁止把 OpenAPI 当作第二权威源；
+- `0002_router_ledger` forward-only migration：accepted publications、publication idempotency、acceptance receipts、evidence envelopes、ordered ingestion jobs、service metadata；
+- Publication acceptance vertical slice：schema validation -> major/minor version check -> canonical payload hash -> idempotency -> 单事务原子持久化 -> 确定性 receipt；
+- 幂等消费边界：首次接受、同 key 重放、alternate key replay/conflict 都会把该 idempotency key 持久化消费，防止已被消费的 key 被后续不同 publication 复用；
+- stdlib HTTP surface：`GET /health`、`POST /historian/publications`；recall/expand 明确返回 `501 not_implemented`；
+- CLI：`migrate`、`check`、`accept`、`serve`；
+- health 明确返回 `bootstrap` 或 `degraded`，Graphiti 始终为 `not_configured`，不会伪装成完整 ready。
 
-## 仍未满足的 R0 / R4 前置门
+## 仍未满足的 R4 / R0 前置门
 
-- 完整 Publication / Evidence / Assessment / Recall / Expand wire schemas 尚未实现；
-- OpenAPI 尚未从接受的 wire contract 生成；
-- GraphitiProfile 仍需锁定 Neo4j runtime、LLM、embedding、reranker、ontology 与 prompt hashes；
-- Router 数据模型、真实 migration、acceptance API、ordered ingestion 与 stable memoryRef 未实现；
-- 还没有真实 Graphiti/Neo4j integration、backup/restore、reindex 或 crash tests；
-- 该基线不应被标记为 R0 complete，也不增加已验收实现百分比。
+- 真实 Graphiti/Neo4j ingestion、ordered ingestion worker 与 active/building group；
+- stable memoryRef、RecallDisposition、recall/search/expand 业务实现；
+- Evidence envelope 的实际写入与重建、备份/恢复、reindex；
+- GraphitiProfile 完整锁（Neo4j runtime、LLM、embedding、reranker、ontology 与 prompt hashes）；
+- 跨进程并发、长时间 crash-window、容量与恢复演练；
+- production lock 与正式 package 发布。
 
-## 推荐下一步
-
-1. 在本仓库先完成跨项目 memory contract v1 的完整 schema 与兼容 fixture；
-2. 再建立 Router ledger 的最小 SQLite schema 和 migration；
-3. 实现不连接 Graphiti 的 Publication acceptance vertical slice；
-4. 锁定完整 GraphitiProfile 后接入 ordered ingestion adapter。
+该状态不标记 R0 或 R4 complete，也不增加 Notion 已验收实现百分比。

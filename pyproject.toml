@@ -9,7 +9,7 @@ description = "Independent long-term memory service for Iris."
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 authors = [{ name = "blueforst" }]
-dependencies = []
+dependencies = ["jsonschema==4.26.0"]
 
 [project.scripts]
 iris-memory = "iris_memory.cli:main"
@@ -48,3 +48,7 @@ python_version = "3.12"
 strict = true
 files = ["src"]
 warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = "jsonschema"
+ignore_missing_imports = true
