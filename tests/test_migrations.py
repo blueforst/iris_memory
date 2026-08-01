@@ -3,6 +3,12 @@ from pathlib import Path
 
 import pytest
 
+from iris_memory.acceptance import (
+    Accepted,
+    DuplicateReplay,
+    IdempotencyConflict,
+    accept_publication,
+)
 from iris_memory.db import apply_migrations
 
 
@@ -12,7 +18,11 @@ def test_empty_database_initializes_and_is_idempotent(tmp_path: Path) -> None:
     first = apply_migrations(database_path)
     second = apply_migrations(database_path)
 
-    assert first.applied_versions == ("0001_bootstrap", "0002_router_ledger")
+    assert first.applied_versions == (
+        "0001_bootstrap",
+        "0002_router_ledger",
+        "0003_router_idempotency_rebuild",
+    )
     assert second.applied_versions == ()
 
     with sqlite3.connect(database_path) as connection:
@@ -27,7 +37,11 @@ def test_empty_database_initializes_and_is_idempotent(tmp_path: Path) -> None:
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
 
-    assert versions == [("0001_bootstrap",), ("0002_router_ledger",)]
+    assert versions == [
+        ("0001_bootstrap",),
+        ("0002_router_ledger",),
+        ("0003_router_idempotency_rebuild",),
+    ]
     assert state == ("ledger_initialized",)
     assert {
         "accepted_publications",
@@ -69,3 +83,125 @@ def test_failed_migration_rolls_back_atomically(tmp_path: Path) -> None:
     assert "ok_table" in tables
     assert "partial_table" not in tables
     assert versions == ["0001_ok"]
+
+
+def test_old_0002_schema_upgrades_to_0003_and_consumes_alternate_key(
+    tmp_path: Path,
+) -> None:
+    """Simulate a data root that already applied the original 0002 (which had
+    publication_id UNIQUE), then upgrade with the current migration set and
+    verify alternate-key replay consumes the key on the rebuilt table."""
+    database_path = tmp_path / "router.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(
+            "CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES "
+            "('0001_bootstrap', '2026-08-01T00:00:00Z')"
+        )
+        connection.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES "
+            "('0002_router_ledger', '2026-08-01T00:00:00Z')"
+        )
+        # Original 0002 schema: publication_id has a UNIQUE constraint.
+        connection.execute(
+            "CREATE TABLE accepted_publications ("
+            "publication_id TEXT PRIMARY KEY, contract_version TEXT NOT NULL, "
+            "source_sequence INTEGER NOT NULL UNIQUE, canonical_payload_hash TEXT NOT NULL, "
+            "receipt_id TEXT NOT NULL UNIQUE, accepted_at TEXT NOT NULL, "
+            "payload_json TEXT NOT NULL)"
+        )
+        connection.execute(
+            "CREATE TABLE publication_idempotency ("
+            "idempotency_key TEXT PRIMARY KEY, publication_id TEXT NOT NULL UNIQUE, "
+            "canonical_payload_hash TEXT NOT NULL, accepted_at TEXT NOT NULL)"
+        )
+        connection.execute(
+            "CREATE TABLE acceptance_receipts ("
+            "receipt_id TEXT PRIMARY KEY, publication_id TEXT NOT NULL UNIQUE, "
+            "status TEXT NOT NULL, receipt_json TEXT NOT NULL, accepted_at TEXT NOT NULL)"
+        )
+        connection.execute(
+            "CREATE TABLE evidence_envelopes ("
+            "envelope_id TEXT PRIMARY KEY, publication_id TEXT NOT NULL UNIQUE, "
+            "contract_version TEXT NOT NULL, source_sequence INTEGER NOT NULL, "
+            "envelope_json TEXT NOT NULL, accepted_at TEXT NOT NULL)"
+        )
+        connection.execute(
+            "CREATE TABLE ingestion_jobs ("
+            "job_id TEXT PRIMARY KEY, publication_id TEXT NOT NULL UNIQUE, "
+            "source_sequence INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', "
+            "graphiti_status TEXT NOT NULL DEFAULT 'not_configured', "
+            "attempt_count INTEGER NOT NULL DEFAULT 0, "
+            "created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+        )
+        connection.execute(
+            "CREATE TABLE service_metadata ("
+            "key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO service_metadata(key, value, updated_at) VALUES "
+            "('router_state', 'ledger_initialized', '2026-08-01T00:00:00Z')"
+        )
+
+    # Upgrade: 0003 must rebuild publication_idempotency without UNIQUE.
+    result = apply_migrations(database_path)
+    assert result.applied_versions == ("0003_router_idempotency_rebuild",)
+
+    with sqlite3.connect(database_path) as connection:
+        index_info = connection.execute("PRAGMA index_list(publication_idempotency)").fetchall()
+        # The rebuilt table must allow multiple keys per publication.
+        connection.execute(
+            "INSERT INTO publication_idempotency"
+            "(idempotency_key, publication_id, canonical_payload_hash, accepted_at) "
+            "VALUES ('k1', 'p1', 'hash1', 't')"
+        )
+        connection.execute(
+            "INSERT INTO publication_idempotency"
+            "(idempotency_key, publication_id, canonical_payload_hash, accepted_at) "
+            "VALUES ('k2', 'p1', 'hash1', 't')"
+        )
+        assert len(index_info) >= 1  # publication index present
+        # Clean the manual rows so the end-to-end path below starts fresh.
+        connection.execute("DELETE FROM publication_idempotency")
+
+    # End-to-end: alternate-key replay consumes the key on the upgraded root.
+    request = {
+        "schemaVersion": "publication-acceptance-request-v1",
+        "contractVersion": "0.1.0",
+        "idempotencyKey": "k1",
+        "publication": {
+            "schemaVersion": "historian-publication-v1",
+            "publicationId": "11111111-1111-4111-8111-111111111111",
+            "sourceSequence": 1,
+            "publishedAt": "2026-08-01T00:00:00Z",
+            "payloadHash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "compartmentCount": 1,
+            "segmentCount": 1,
+            "evidenceCount": 1,
+            "summary": "upgrade fixture",
+        },
+    }
+    first = accept_publication(database_path, request)
+    assert isinstance(first, Accepted)
+    replay = accept_publication(
+        database_path,
+        {**request, "idempotencyKey": "k2"},
+    )
+    assert isinstance(replay, DuplicateReplay)
+    later = accept_publication(
+        database_path,
+        {
+            **request,
+            "idempotencyKey": "k2",
+            "publication": {
+                **request["publication"],
+                "publicationId": "22222222-2222-4222-8222-222222222222",
+                "sourceSequence": 2,
+                "summary": "different publication reusing consumed key",
+            },
+        },
+    )
+    assert isinstance(later, IdempotencyConflict)

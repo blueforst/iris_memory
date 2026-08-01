@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS accepted_publications (
 
 CREATE TABLE IF NOT EXISTS publication_idempotency (
     idempotency_key TEXT PRIMARY KEY,
-    publication_id TEXT NOT NULL,
+    publication_id TEXT NOT NULL UNIQUE,
     canonical_payload_hash TEXT NOT NULL,
     accepted_at TEXT NOT NULL
 );
@@ -46,8 +46,6 @@ CREATE TABLE IF NOT EXISTS ingestion_jobs (
 
 CREATE INDEX IF NOT EXISTS idx_accepted_publications_sequence
     ON accepted_publications(source_sequence);
-CREATE INDEX IF NOT EXISTS idx_publication_idempotency_publication
-    ON publication_idempotency(publication_id);
 CREATE INDEX IF NOT EXISTS idx_ingestion_jobs_status
     ON ingestion_jobs(status);
 
