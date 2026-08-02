@@ -24,7 +24,6 @@ The Publication endpoint directly reuses the tested acceptance core
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import socket
@@ -168,8 +167,10 @@ class DataRootLock:
                 pass
             os.close(self._fd)
             self._fd = None
-        with contextlib.suppress(FileNotFoundError):
-            self._lock_path.unlink()
+        # review-pass-2 #1: do NOT unlink. The lockfile inode is persistent;
+        # unlinking would create a window where a successor creates a NEW
+        # inode at the same path while another process still holds the OLD
+        # inode's lock (double-hold on the same data root).
 
 
 _MANIFEST_CACHE: dict[str, object] | None = None
@@ -186,12 +187,12 @@ def _cached_manifest() -> dict[str, object]:
 
 def build_capabilities() -> dict[str, object]:
     """Capability/version handshake payload (contract:
-    capability-handshake-v1). Expresses exactly what is available and what is
+    capability-handshake-v2). Expresses exactly what is available and what is
     explicitly unavailable; Graphiti is not configured in this baseline."""
     manifest = _cached_manifest()
     readiness, degraded = _readiness()
     return {
-        "schemaVersion": "capability-handshake-v1",
+        "schemaVersion": "capability-handshake-v2",
         "serviceVersion": CONTRACT_PACKAGE.version,
         "serviceName": "iris-memory",
         "contractPackage": CONTRACT_PACKAGE.name,
@@ -307,16 +308,64 @@ def make_handler(database_path: Path, manifest_sha: str) -> type[BaseHTTPRequest
 
 
 def serve(config: MemoryServiceConfig, *, host: str = "127.0.0.1", port: int = 18011) -> None:
-    """Acquire the lock, apply migrations, serve until interrupted, then
-    release the lock. A second process against the same data root fails fast."""
+    """Acquire the lock, apply migrations, serve until SIGINT/SIGTERM, then
+    perform a REAL graceful shutdown: stop accepting requests, wait for the
+    server + worker threads, release the lock, and exit 0. A second process
+    against the same data root fails fast (review-pass-2 #5)."""
+    import signal as _signal
+    import threading as _threading
+    import time as _time
+
     config.ensure_directories()
     lock = DataRootLock.acquire(config.data_root)
+    server: ThreadingHTTPServer | None = None
+    stop_event = _threading.Event()
+
+    def _handle_signal(signum: int, frame: object) -> None:
+        # Graceful: signal the accept loop to stop; the main thread then
+        # closes the server (waits for in-flight handlers) before releasing
+        # the lock.
+        del signum, frame
+        stop_event.set()
+
+    prev_int = _signal.signal(_signal.SIGINT, _handle_signal)
+    prev_term = _signal.signal(_signal.SIGTERM, _handle_signal)
     try:
         apply_migrations(config.database_path)
         manifest = _cached_manifest()
         manifest_sha = str(manifest["manifestSha256"])
         handler = make_handler(config.database_path, manifest_sha)
-        with ThreadingHTTPServer((host, port), handler) as server:
-            server.serve_forever()
+        server = ThreadingHTTPServer((host, port), handler)
+        # Manual accept loop (serve_forever has no public stop-on-signal):
+        # handle_request() blocks at most server.timeout, so a signal is
+        # observed within the poll interval and the loop exits cleanly.
+        server.timeout = 0.2
+        while not stop_event.is_set():
+            try:
+                server.handle_request()
+            except OSError:
+                break
+
+        # Stop accepting, wait for in-flight request threads, then release
+        # resources in order (review-pass-2 #5).
+        server.server_close()
+        deadline = _time.monotonic() + 5.0
+        while _time.monotonic() < deadline:
+            active = [t for t in _threading.enumerate() if t is not _threading.main_thread()]
+            workers = [
+                t
+                for t in active
+                if t.name.startswith(("ThreadPoolExecutor", "Thread-", "Socketserver"))
+            ]
+            if not workers:
+                break
+            _time.sleep(0.1)
+        server = None
     finally:
+        _signal.signal(_signal.SIGINT, prev_int)
+        _signal.signal(_signal.SIGTERM, prev_term)
         lock.release()
+
+
+if __name__ == "__main__":
+    raise RuntimeError("use `iris-memory serve` (CLI)")

@@ -339,9 +339,14 @@ def verify_artifact_directory(root: Path) -> tuple[bool, tuple[str, ...]]:
         "openapi": declared_openapi_list,
     }
 
-    # M6: reject EXTRA files not listed in the manifest (a complete artifact
-    # is exactly the manifest surface).
+    # M6 / review-pass-2 #6: reject EXTRA files not listed in the manifest —
+    # in the three content groups AND at the artifact root (a complete
+    # artifact is exactly the manifest surface; the only allowed root file is
+    # manifest.json itself).
     extra: list[str] = []
+    for path in root.iterdir():
+        if path.is_file() and path.name != "manifest.json":
+            extra.append(path.name)
     for group in ("schemas", "fixtures", "openapi"):
         group_dir = root / group
         if not group_dir.is_dir():

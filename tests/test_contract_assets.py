@@ -24,7 +24,7 @@ def test_manifest_matches_contract_package() -> None:
 
 
 def test_capability_handshake_matches_contract_package() -> None:
-    fixture = _read("fixtures/capability-handshake-v1.valid.json")
+    fixture = _read("fixtures/capability-handshake-v2.valid.json")
     assert fixture["contractVersion"] == CONTRACT_PACKAGE.version
 
 

@@ -1,6 +1,6 @@
 {
   "package": "iris-memory-contracts",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "status": "candidate_v1",
   "authority": {
     "schemas": "authoritative",
@@ -8,7 +8,7 @@
   },
   "schemas": [
     "schemas/acceptance-receipt-v1.schema.json",
-    "schemas/capability-handshake-v1.schema.json",
+    "schemas/capability-handshake-v2.schema.json",
     "schemas/duplicate-replay-receipt-v1.schema.json",
     "schemas/expansion-request-v1.schema.json",
     "schemas/expansion-response-v1.schema.json",
@@ -25,9 +25,9 @@
   "fixtures": [
     "fixtures/acceptance-receipt-v1.invalid.json",
     "fixtures/acceptance-receipt-v1.valid.json",
-    "fixtures/capability-handshake-v1.invalid-semver.json",
-    "fixtures/capability-handshake-v1.invalid.json",
-    "fixtures/capability-handshake-v1.valid.json",
+    "fixtures/capability-handshake-v2.invalid-semver.json",
+    "fixtures/capability-handshake-v2.invalid.json",
+    "fixtures/capability-handshake-v2.valid.json",
     "fixtures/duplicate-replay-receipt-v1.invalid.json",
     "fixtures/duplicate-replay-receipt-v1.valid.json",
     "fixtures/expansion-request-v1.invalid.json",

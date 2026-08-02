@@ -63,8 +63,8 @@ def test_v1_health_and_capabilities(tmp_path: Path) -> None:
         response = connection.getresponse()
         assert response.status == 200
         caps = json.loads(response.read().decode("utf-8"))
-        assert caps["schemaVersion"] == "capability-handshake-v1"
-        assert caps["contractVersion"] == "0.1.0"
+        assert caps["schemaVersion"] == "capability-handshake-v2"
+        assert caps["contractVersion"] == "0.1.1"
         assert caps["supportedMajor"] == 0
         assert caps["supportedMinor"] == 1
         assert "publication.accept" in caps["capabilities"]
@@ -229,11 +229,11 @@ def _validate_with_schema(instance: dict[str, object], schema_name: str) -> None
 
 def test_capabilities_payload_passes_authoritative_schema(tmp_path: Path) -> None:
     """M2: GET /v1/capabilities output must validate against the packaged
-    capability-handshake-v1 schema (single wire-contract authority)."""
+    capability-handshake-v2 schema (single wire-contract authority)."""
     from iris_memory.service import build_capabilities
 
     payload = build_capabilities()
-    _validate_with_schema(payload, "capability-handshake-v1")
+    _validate_with_schema(payload, "capability-handshake-v2")
 
 
 def test_not_implemented_501_body_passes_authoritative_schema(tmp_path: Path) -> None:

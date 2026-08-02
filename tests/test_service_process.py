@@ -95,14 +95,20 @@ def _post(port: int, path: str, payload: dict[str, object]) -> tuple[int, dict[s
     return response.status, body
 
 
-def _stop(proc: subprocess.Popen[bytes], timeout: float = 10) -> None:
+def _stop(proc: subprocess.Popen[bytes], timeout: float = 10) -> int:
+    """Graceful stop via SIGTERM; asserts the process exits 0 (review-pass-2
+    #5: a REAL graceful shutdown — signal handler -> stop accepting -> close
+    server -> release lock -> exit 0, not a default-termination kill)."""
     if proc.poll() is None:
         proc.send_signal(signal.SIGTERM)
     try:
-        proc.wait(timeout=timeout)
+        return_code = proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
+        raise AssertionError("serve did not exit gracefully on SIGTERM") from None
+    assert return_code == 0, f"graceful shutdown must exit 0, got {return_code}"
+    return return_code
 
 
 def test_serve_ready_health_capabilities_and_replay(tmp_path: Path) -> None:

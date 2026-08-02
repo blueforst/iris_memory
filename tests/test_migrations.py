@@ -57,6 +57,21 @@ def test_empty_database_initializes_and_is_idempotent(tmp_path: Path) -> None:
     } <= tables
 
 
+def _write_checksums_manifest(migrations_dir: Path) -> None:
+    """Emit a release-owned checksums.json matching the SQL files in a custom
+    migrations dir, so the release-manifest strict check passes."""
+    import hashlib
+    import json
+
+    checksums = {}
+    for path in sorted(migrations_dir.glob("*.sql")):
+        version = path.name.removesuffix(".sql")
+        checksums[version] = hashlib.sha256(path.read_bytes()).hexdigest()
+    (migrations_dir / "checksums.json").write_text(
+        json.dumps({"checksums": checksums}), encoding="utf-8"
+    )
+
+
 def test_failed_migration_rolls_back_atomically(tmp_path: Path) -> None:
     database_path = tmp_path / "router.sqlite3"
     migrations_dir = tmp_path / "migrations"
@@ -70,6 +85,7 @@ def test_failed_migration_rolls_back_atomically(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
+    _write_checksums_manifest(migrations_dir)
     with pytest.raises(sqlite3.OperationalError):
         apply_migrations(database_path, migrations_dir=migrations_dir)
 
@@ -228,16 +244,21 @@ def test_migration_checksum_fails_closed_when_applied_migration_changes(
         "CREATE TABLE t (id INTEGER PRIMARY KEY);",
         encoding="utf-8",
     )
+    _write_checksums_manifest(migrations_dir)
 
     result = apply_migrations(database_path, migrations_dir=migrations_dir)
     assert result.applied_versions == ("0001_first",)
 
-    # Now modify the already-applied migration's SQL: must fail closed.
+    # Now modify the already-applied migration's SQL: the release manifest
+    # (unchanged) still pins the ORIGINAL checksum, so the runner must detect
+    # the drift and fail closed BEFORE touching the database.
     (migrations_dir / "0001_first.sql").write_text(
         "CREATE TABLE t (id INTEGER PRIMARY KEY, extra TEXT);",
         encoding="utf-8",
     )
-    with pytest.raises(MigrationChecksumError, match="0001_first changed after being applied"):
+    with pytest.raises(
+        MigrationChecksumError, match="0001_first bytes do not match its release-owned checksum"
+    ):
         apply_migrations(database_path, migrations_dir=migrations_dir)
 
 
@@ -253,6 +274,7 @@ def test_migration_failure_rolls_back_atomically(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
+    _write_checksums_manifest(migrations_dir)
     with pytest.raises(sqlite3.OperationalError):
         apply_migrations(database_path, migrations_dir=migrations_dir)
 
@@ -280,6 +302,7 @@ def test_migration_reapply_is_idempotent_across_restart(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
+    _write_checksums_manifest(migrations_dir)
     apply_migrations(database_path, migrations_dir=migrations_dir)
     second = apply_migrations(database_path, migrations_dir=migrations_dir)
     assert second.applied_versions == ()
@@ -309,6 +332,7 @@ def test_legacy_empty_checksum_is_backfilled_from_release_manifest(tmp_path: Pat
         encoding="utf-8",
     )
 
+    _write_checksums_manifest(migrations_dir)
     apply_migrations(database_path, migrations_dir=migrations_dir)
     original_sha = _sql_sha256((migrations_dir / "0001_first.sql").read_text(encoding="utf-8"))
 
@@ -324,6 +348,7 @@ def test_legacy_empty_checksum_is_backfilled_from_release_manifest(tmp_path: Pat
     )
 
     # Next run backfills the REAL release-owned checksum.
+    _write_checksums_manifest(migrations_dir)
     apply_migrations(database_path, migrations_dir=migrations_dir)
     with sqlite3.connect(database_path) as connection:
         checksum = connection.execute(
@@ -336,6 +361,7 @@ def test_legacy_empty_checksum_is_backfilled_from_release_manifest(tmp_path: Pat
         "CREATE TABLE t (id INTEGER PRIMARY KEY, extra TEXT);",
         encoding="utf-8",
     )
+    _write_checksums_manifest(migrations_dir)
     with pytest.raises(MigrationChecksumError):
         apply_migrations(database_path, migrations_dir=migrations_dir)
 
@@ -353,11 +379,14 @@ def test_legacy_empty_checksum_without_release_manifest_fails_closed(tmp_path: P
         encoding="utf-8",
     )
 
+    _write_checksums_manifest(migrations_dir)
     apply_migrations(database_path, migrations_dir=migrations_dir)
     with sqlite3.connect(database_path) as connection:
         connection.execute(
             "UPDATE schema_migrations SET checksum = '' WHERE version = '0001_first'"
         )
-    # No checksums.json provided: backfill must fail closed.
-    with pytest.raises(MigrationChecksumError, match="no release-owned checksum"):
+    # Remove the release manifest: the strict check must fail closed BEFORE
+    # any migration runs.
+    (migrations_dir / "checksums.json").unlink()
+    with pytest.raises(MigrationChecksumError, match="release manifest mismatch"):
         apply_migrations(database_path, migrations_dir=migrations_dir)
