@@ -130,3 +130,46 @@ artifact; iris-agent pins and verifies it.
 - Graphiti/Neo4j ingestion, stable memoryRef, Recall/Search/Expand business
   and reindex remain explicitly not implemented;
 - No npm/PyPI publication (user authorization required).
+
+## Independent review fixes (M1-M6)
+
+Audited head `571de1d` by an independent reviewer; all merge blockers fixed:
+
+- **M1 — kernel-held OS lock**: `DataRootLock` now uses `fcntl.flock` (POSIX)
+  / `msvcrt.locking` (Windows) as the authoritative OS lock with a short
+  acquire timeout (second service process fails fast). PID/host in the
+  lockfile are DIAGNOSTIC ONLY and never used for stale reaping; a leftover
+  lockfile with no kernel holder does not block a fresh acquire. New tests:
+  kernel-lock fail-fast, PID-not-authority. Real subprocess tests prove
+  second-process rejection, hard-exit (SIGKILL) restart with kernel auto-
+  release, and graceful reopen.
+- **M2 — handshake ↔ schema alignment**: `capability-handshake-v1.schema.json`
+  now describes the REAL runtime payload (schemaVersion/serviceName/
+  serviceVersion/contractPackage/contractVersion/contractVersions/
+  supportedMajor/supportedMinor/manifestSha256/schemaCount/fixtureCount/
+  capabilities incl. capability.handshake/unavailableCapabilities/
+  graphitiStatus/readiness/degradedReasons); valid + invalid-semver fixtures
+  updated. A new test validates the live `GET /v1/capabilities` output against
+  the authoritative schema (CI would have caught the drift).
+- **M3 — versioned 501**: new `not-implemented-error-v1` schema + fixtures;
+  recall/expand 501 bodies use it (`schemaVersion/error/code/capability`),
+  validated by test against the schema. OpenAPI documents the /v1 surface.
+- **M4 — forward-migration checksum**: new `0004_checksum_metadata.sql`
+  forward migration adds the checksum column (no runtime ALTER); the runner
+  backfills legacy empty checksums ONLY from the release-owned
+  `db/migrations/checksums.json` manifest (never current disk bytes), fails
+  closed when no release checksum exists, and fails closed on a recorded
+  version missing from the source set. 0001-0003 unchanged.
+- **M5 — product-path subprocess evidence**: `tests/test_service_process.py`
+  exercises the real `iris-memory serve` lifecycle (ready/health/
+  capabilities, Publication replay, second-process lock rejection, SIGKILL
+  hard-exit restart, graceful shutdown + immediate reopen).
+- **M6 — self-contained artifact verification**: `verify_artifact_directory`
+  is fully root-authoritative — manifest structure vs declared lists,
+  per-file content hashes, EXTRA-file rejection (complete artifact = exact
+  manifest surface), and fixture re-validation using the artifact's OWN
+  schemas (a consumer with only the artifact reaches the same verdict).
+  `write_contract_artifact` refuses a non-empty output directory.
+
+Test count: 68 pytest (round-2 40 + artifact 9 + service 9 + migrations 8 +
+process 3 - legacy 1 merged). ruff/mypy/format clean.

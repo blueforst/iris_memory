@@ -71,16 +71,17 @@ class MemoryLockError(Exception):
 
 class DataRootLock:
     """OS-level exclusive lock on <data-root>/memory.lock for the process
-    lifetime.
+    lifetime (M1 review fix).
 
-    - O_EXCL creation is atomic on POSIX and Windows (CREATE_NEW), so a
-      second process fails fast without entering recovery.
-    - A STALE lock (previous process hard-crashed, lockfile left behind) is
-      detected by checking the recorded PID is no longer alive and is then
-      reaped before acquiring (the OS lockfile itself is advisory state, the
-      authority is the O_EXCL acquire).
-    - The lockfile records pid/host/startedAt for diagnostics; those fields
-      are not ownership authority.
+    - The lock is a REAL kernel-held OS file lock (`fcntl.flock` on POSIX,
+      `msvcrt.locking` on Windows), not an O_EXCL path-existence heuristic.
+      The OS lock is authoritative: a second process blocks/fails against the
+      kernel, and the lock is auto-released by the kernel if the holder dies.
+    - PID/host/startedAt in the lockfile are DIAGNOSTIC ONLY and are never
+      used to reap or judge a lock: stale cleanup without first acquiring the
+      authoritative OS lock is forbidden (a live holder could be misjudged).
+    - acquire() is blocking with a short timeout so a second service process
+      fails fast; release() drops the kernel lock then removes the file.
     """
 
     def __init__(self, lock_path: Path) -> None:
@@ -88,72 +89,95 @@ class DataRootLock:
         self._fd: int | None = None
 
     @classmethod
-    def _pid_is_alive(cls, pid: int) -> bool:
-        try:
-            os.kill(pid, 0)
-        except OSError:
-            return False
-        return True
-
-    @classmethod
-    def acquire(cls, data_root: Path) -> DataRootLock:
+    def acquire(
+        cls,
+        data_root: Path,
+        *,
+        timeout_ms: float = 3000,
+    ) -> DataRootLock:
         lock_path = data_root / "memory.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        # Reap a stale lock whose holder is no longer alive.
-        if lock_path.exists():
-            try:
-                payload = json.loads(lock_path.read_text(encoding="utf-8"))
-                pid = payload.get("pid")
-                if isinstance(pid, int) and not cls._pid_is_alive(pid):
-                    with contextlib.suppress(OSError):
-                        lock_path.unlink()
-            except (ValueError, OSError):
-                # Unparseable or unreadable lockfile: leave it; the O_EXCL
-                # acquire below decides authority.
-                pass
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
         try:
-            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError as exc:
-            raise MemoryLockError(
-                f"memory data root is locked by another process: {lock_path}"
-            ) from exc
-        try:
-            os.write(
-                fd,
-                json.dumps(
-                    {
-                        "pid": os.getpid(),
-                        "host": socket.gethostname(),
-                        "startedAt": __import__("datetime").datetime.now().isoformat(),
-                    }
-                ).encode("utf-8"),
-            )
+            # Block up to timeout_ms for the kernel lock; fail fast after.
+            cls._lock_fd(fd, timeout_ms)
+            payload = json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "host": socket.gethostname(),
+                    "startedAt": __import__("datetime").datetime.now().isoformat(),
+                    "note": "diagnostic only; the OS lock is authoritative",
+                }
+            ).encode("utf-8")
+            os.ftruncate(fd, 0)
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.write(fd, payload)
             os.fsync(fd)
-        except OSError:
+        except OSError as exc:
             os.close(fd)
-            with contextlib.suppress(FileNotFoundError):
-                lock_path.unlink()
-            raise
+            raise MemoryLockError(f"memory data root is locked: {lock_path}") from exc
         lock = cls(lock_path)
         lock._fd = fd
         return lock
 
+    @staticmethod
+    def _lock_fd(fd: int, timeout_ms: float) -> None:
+        import time
+
+        if os.name == "nt":
+            import msvcrt
+
+            locking = msvcrt.locking  # type: ignore[attr-defined]
+            nb_lock = msvcrt.LK_NBLCK  # type: ignore[attr-defined]
+            deadline = time.monotonic() + timeout_ms / 1000.0
+            while True:
+                try:
+                    locking(fd, nb_lock, 1)
+                    return
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.02)
+        else:
+            import fcntl
+
+            # LOCK_EX | LOCK_NB, retry until timeout (fast-fail for a second
+            # live process, kernel-held so a hard crash auto-releases).
+            deadline = time.monotonic() + timeout_ms / 1000.0
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.02)
+
     def release(self) -> None:
         if self._fd is not None:
-            # Unlink the lockfile BEFORE closing so a successor acquiring
-            # immediately after sees a consistent O_EXCL state; then close.
-            with contextlib.suppress(FileNotFoundError):
-                self._lock_path.unlink()
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(self._fd, msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
+                else:
+                    import fcntl
+
+                    fcntl.flock(self._fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
             os.close(self._fd)
             self._fd = None
+        with contextlib.suppress(FileNotFoundError):
+            self._lock_path.unlink()
 
 
 _MANIFEST_CACHE: dict[str, object] | None = None
 
 
 def _cached_manifest() -> dict[str, object]:
-    """Build the artifact manifest once per process (assets are immutable
-    once installed); a per-request full directory scan is wasteful."""
+    """Build the artifact manifest once per process (assets are immutable once
+    installed); a per-request full directory scan is wasteful."""
     global _MANIFEST_CACHE
     if _MANIFEST_CACHE is None:
         _MANIFEST_CACHE = build_artifact_manifest()
@@ -228,18 +252,22 @@ def make_handler(database_path: Path, manifest_sha: str) -> type[BaseHTTPRequest
                 self._send_json(
                     501,
                     {
-                        "schemaVersion": "recall-request-v1",
-                        "error": "recall_not_implemented",
+                        "schemaVersion": "not-implemented-error-v1",
+                        "error": "not_implemented",
                         "code": "not_implemented",
+                        "capability": "recall",
+                        "message": "recall is not implemented in the R0 baseline",
                     },
                 )
             elif path == "/v1/memory/expand" or path == "/memory/expand":
                 self._send_json(
                     501,
                     {
-                        "schemaVersion": "expansion-request-v1",
-                        "error": "expand_not_implemented",
+                        "schemaVersion": "not-implemented-error-v1",
+                        "error": "not_implemented",
                         "code": "not_implemented",
+                        "capability": "expand",
+                        "message": "expand is not implemented in the R0 baseline",
                     },
                 )
             else:

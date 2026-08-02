@@ -58,6 +58,9 @@ def test_openapi_asset_exists_and_parses() -> None:
         "/historian/publications",
         "/memory/recall",
         "/memory/expand",
+        "/v1/capabilities",
+        "/v1/memory/recall",
+        "/v1/memory/expand",
     }
 
 

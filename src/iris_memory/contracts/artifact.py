@@ -253,7 +253,16 @@ def validate_fixtures(manifest: dict[str, object]) -> tuple[bool, tuple[str, ...
 
 def write_contract_artifact(output_dir: Path) -> Path:
     """Write the full artifact (manifest + schemas + fixtures + openapi) into
-    a fresh output directory and return the manifest path."""
+    a fresh output directory and return the manifest path.
+
+    M6 (review): the output directory must be EMPTY (or absent) so a reused
+    directory cannot accumulate stale files that break the complete-artifact
+    and byte-reproducibility guarantees.
+    """
+    if output_dir.exists() and any(output_dir.iterdir()):
+        raise ValueError(
+            f"artifact output directory must be empty: {output_dir} (remove it or use a fresh path)"
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest = build_artifact_manifest()
 
@@ -294,35 +303,117 @@ def verify_artifact_directory(root: Path) -> tuple[bool, tuple[str, ...]]:
     if not manifest_path.exists():
         return (False, ("artifact is missing manifest.json",))
     manifest = load_manifest(manifest_path)
-    ok_manifest, manifest_errors = verify_manifest(manifest)
-    ok_fixtures, fixture_errors = validate_fixtures(manifest)
+    errors: list[str] = []
+
+    # M6 (review): verify the manifest STRUCTURE against its own declared
+    # lists (the manifest is the self-contained authority — do not compare
+    # against the installed package, which a consumer may not have).
+    declared_schemas = manifest.get("schemas")
+    declared_fixtures = manifest.get("fixtures")
+    declared_openapi = manifest.get("openapi")
+    if not isinstance(declared_schemas, list) or not isinstance(declared_fixtures, list):
+        return (False, ("manifest is missing 'schemas'/'fixtures' lists",))
+    manifest_sha = recompute_manifest_sha256(manifest)
+    if manifest_sha != manifest.get("manifestSha256"):
+        errors.append(
+            f"manifestSha256 mismatch: declared={manifest.get('manifestSha256')} "
+            f"recomputed={manifest_sha}"
+        )
 
     checksums = manifest.get("checksums")
     if not isinstance(checksums, dict):
-        early_errors = list(manifest_errors) + list(fixture_errors)
-        early_errors.append("manifest is missing 'checksums'")
-        return (False, tuple(early_errors))
+        errors.append("manifest is missing 'checksums'")
+        return (False, tuple(errors))
 
-    errors: list[str] = []
+    declared_openapi_list = (
+        [str(e) for e in declared_openapi] if isinstance(declared_openapi, list) else []
+    )
+    declared_all = [
+        *(str(e) for e in declared_schemas),
+        *(str(e) for e in declared_fixtures),
+        *declared_openapi_list,
+    ]
+    expected_groups = {
+        "schemas": [str(e) for e in declared_schemas],
+        "fixtures": [str(e) for e in declared_fixtures],
+        "openapi": declared_openapi_list,
+    }
+
+    # M6: reject EXTRA files not listed in the manifest (a complete artifact
+    # is exactly the manifest surface).
+    extra: list[str] = []
+    for group in ("schemas", "fixtures", "openapi"):
+        group_dir = root / group
+        if not group_dir.is_dir():
+            continue
+        for path in group_dir.iterdir():
+            if path.is_file():
+                relative = f"{group}/{path.name}"
+                if relative not in declared_all:
+                    extra.append(relative)
+    if extra:
+        errors.append(f"artifact directory contains files not in the manifest: {sorted(extra)}")
+
+    # M6: every declared file must exist AND hash to the recorded checksum.
     missing: list[str] = []
     content_mismatch: list[str] = []
-    for relative in iter_manifest_files(manifest):
-        target = root / relative
-        if not target.exists():
-            missing.append(relative)
-            continue
-        group = relative.split("/", 1)[0]
+    for group, relatives in expected_groups.items():
         group_map = checksums.get(group)
-        recorded = group_map.get(relative) if isinstance(group_map, dict) else None
-        if not isinstance(recorded, str):
+        if not isinstance(group_map, dict):
+            errors.append(f"checksums missing group '{group}'")
             continue
-        actual = file_sha256(target)
-        if actual != recorded:
-            content_mismatch.append(f"{relative} (declared {recorded}, actual {actual})")
+        for relative in relatives:
+            target = root / relative
+            if not target.exists():
+                missing.append(relative)
+                continue
+            recorded = group_map.get(relative)
+            if not isinstance(recorded, str):
+                errors.append(f"checksum missing for {relative}")
+                continue
+            actual = file_sha256(target)
+            if actual != recorded:
+                content_mismatch.append(f"{relative} (declared {recorded}, actual {actual})")
     if missing:
         errors.append(f"artifact directory missing files: {missing}")
     if content_mismatch:
         errors.append(f"artifact content checksum mismatch: {content_mismatch}")
-    errors.extend(manifest_errors)
-    errors.extend(fixture_errors)
-    return (ok_manifest and ok_fixtures and not missing and not content_mismatch, tuple(errors))
+
+    # M6: re-validate every fixture against the schema INSIDE the artifact
+    # (self-contained — a consumer with only the artifact gets the same
+    # verdict).
+    fixture_errors: list[str] = []
+    for relative in expected_groups["fixtures"]:
+        name = relative.rsplit("/", 1)[-1]
+        if ".valid." in name:
+            schema_name = name.split(".valid.")[0]
+            expect_valid = True
+        elif ".invalid" in name:
+            schema_name = name.split(".invalid")[0]
+            expect_valid = False
+        else:
+            fixture_errors.append(f"fixture {relative} is neither *.valid.* nor *.invalid*")
+            continue
+        schema_path = root / "schemas" / f"{schema_name}.schema.json"
+        fixture_path = root / relative
+        if not schema_path.exists() or not fixture_path.exists():
+            fixture_errors.append(f"fixture {relative} or its schema is missing")
+            continue
+        try:
+            from jsonschema import Draft202012Validator, FormatChecker
+
+            schema = json.loads(schema_path.read_text(encoding="utf-8"))
+            instance = json.loads(fixture_path.read_text(encoding="utf-8"))
+            validator = Draft202012Validator(schema, format_checker=FormatChecker())
+            validation_errors = list(validator.iter_errors(instance))
+        except Exception as exc:  # noqa: BLE001 - any failure is a verifier error
+            fixture_errors.append(f"fixture {relative} validation failed: {exc}")
+            continue
+        if expect_valid and validation_errors:
+            fixture_errors.append(f"{relative} should be valid but failed: {validation_errors}")
+        if not expect_valid and not validation_errors:
+            fixture_errors.append(f"{relative} should be invalid but validated cleanly")
+    if fixture_errors:
+        errors.append("fixture validation: " + "; ".join(fixture_errors))
+
+    return (not errors, tuple(errors))

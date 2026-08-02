@@ -23,6 +23,7 @@ def test_empty_database_initializes_and_is_idempotent(tmp_path: Path) -> None:
         "0001_bootstrap",
         "0002_router_ledger",
         "0003_router_idempotency_rebuild",
+        "0004_checksum_metadata",
     )
     assert second.applied_versions == ()
 
@@ -42,6 +43,7 @@ def test_empty_database_initializes_and_is_idempotent(tmp_path: Path) -> None:
         ("0001_bootstrap",),
         ("0002_router_ledger",),
         ("0003_router_idempotency_rebuild",),
+        ("0004_checksum_metadata",),
     ]
     assert state == ("ledger_initialized",)
     assert {
@@ -147,9 +149,14 @@ def test_old_0002_schema_upgrades_to_0003_and_consumes_alternate_key(
             "('router_state', 'ledger_initialized', '2026-08-01T00:00:00Z')"
         )
 
-    # Upgrade: 0003 must rebuild publication_idempotency without UNIQUE.
+    # Upgrade: 0003 must rebuild publication_idempotency without UNIQUE, and
+    # 0004 adds the checksum column + backfills 0001/0002 from the release
+    # manifest.
     result = apply_migrations(database_path)
-    assert result.applied_versions == ("0003_router_idempotency_rebuild",)
+    assert result.applied_versions == (
+        "0003_router_idempotency_rebuild",
+        "0004_checksum_metadata",
+    )
 
     with sqlite3.connect(database_path) as connection:
         index_info = connection.execute("PRAGMA index_list(publication_idempotency)").fetchall()
@@ -283,10 +290,16 @@ def test_migration_reapply_is_idempotent_across_restart(tmp_path: Path) -> None:
     assert checksum is not None and checksum[0] != ""
 
 
-def test_legacy_empty_checksum_is_backfilled_on_next_run(tmp_path: Path) -> None:
-    """MAJOR#2 (review): a pre-round-3 database whose checksum column was
-    added as '' must have the real checksum backfilled on the next run so
-    subsequent tampering of that migration is detected."""
+def _sql_sha256(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def test_legacy_empty_checksum_is_backfilled_from_release_manifest(tmp_path: Path) -> None:
+    """M4 (review): a pre-round-3 row with checksum '' is backfilled ONLY from
+    the release-owned checksums manifest — never from current disk bytes.
+    After backfill, tampering of the applied migration IS detected."""
     data_root = tmp_path / "memory"
     database_path = data_root / "router.sqlite3"
     migrations_dir = data_root / "migrations"
@@ -297,31 +310,54 @@ def test_legacy_empty_checksum_is_backfilled_on_next_run(tmp_path: Path) -> None
     )
 
     apply_migrations(database_path, migrations_dir=migrations_dir)
+    original_sha = _sql_sha256((migrations_dir / "0001_first.sql").read_text(encoding="utf-8"))
 
-    # Simulate a legacy row: blank the checksum (as the pre-round-3 backfill
-    # would have left it).
+    # Simulate a legacy row: blank the checksum.
     with sqlite3.connect(database_path) as connection:
         connection.execute(
             "UPDATE schema_migrations SET checksum = '' WHERE version = '0001_first'"
         )
-    with sqlite3.connect(database_path) as connection:
-        checksum = connection.execute(
-            "SELECT checksum FROM schema_migrations WHERE version='0001_first'"
-        ).fetchone()
-    assert checksum is not None and checksum[0] == ""
+    # The release-owned manifest is the ONLY trusted source for the backfill.
+    (migrations_dir / "checksums.json").write_text(
+        '{"checksums": {"0001_first": "' + original_sha + '"}}',
+        encoding="utf-8",
+    )
 
-    # Next run backfills the real checksum.
+    # Next run backfills the REAL release-owned checksum.
     apply_migrations(database_path, migrations_dir=migrations_dir)
     with sqlite3.connect(database_path) as connection:
         checksum = connection.execute(
             "SELECT checksum FROM schema_migrations WHERE version='0001_first'"
         ).fetchone()
-    assert checksum is not None and checksum[0] != ""
+    assert checksum is not None and checksum[0] == original_sha
 
-    # Now tampering the applied migration IS detected (fail-closed restored).
+    # Tampering the applied migration IS now detected (fail-closed restored).
     (migrations_dir / "0001_first.sql").write_text(
         "CREATE TABLE t (id INTEGER PRIMARY KEY, extra TEXT);",
         encoding="utf-8",
     )
     with pytest.raises(MigrationChecksumError):
+        apply_migrations(database_path, migrations_dir=migrations_dir)
+
+
+def test_legacy_empty_checksum_without_release_manifest_fails_closed(tmp_path: Path) -> None:
+    """M4 (review): a legacy empty checksum with NO release-owned manifest
+    entry must fail closed (explicit audited migration required), never
+    silently blessed from current disk bytes."""
+    data_root = tmp_path / "memory"
+    database_path = data_root / "router.sqlite3"
+    migrations_dir = data_root / "migrations"
+    migrations_dir.mkdir(parents=True)
+    (migrations_dir / "0001_first.sql").write_text(
+        "CREATE TABLE t (id INTEGER PRIMARY KEY);",
+        encoding="utf-8",
+    )
+
+    apply_migrations(database_path, migrations_dir=migrations_dir)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "UPDATE schema_migrations SET checksum = '' WHERE version = '0001_first'"
+        )
+    # No checksums.json provided: backfill must fail closed.
+    with pytest.raises(MigrationChecksumError, match="no release-owned checksum"):
         apply_migrations(database_path, migrations_dir=migrations_dir)

@@ -129,7 +129,9 @@ def test_v1_recall_and_expand_are_501_not_empty_success(tmp_path: Path) -> None:
         response = connection.getresponse()
         assert response.status == 501
         body = json.loads(response.read().decode("utf-8"))
-        assert body["error"] == "recall_not_implemented"
+        assert body["schemaVersion"] == "not-implemented-error-v1"
+        assert body["error"] == "not_implemented"
+        assert body["capability"] == "recall"
 
         connection.request(
             "POST", "/v1/memory/expand", body=b"{}", headers={"Content-Type": "application/json"}
@@ -137,7 +139,9 @@ def test_v1_recall_and_expand_are_501_not_empty_success(tmp_path: Path) -> None:
         response = connection.getresponse()
         assert response.status == 501
         body = json.loads(response.read().decode("utf-8"))
-        assert body["error"] == "expand_not_implemented"
+        assert body["schemaVersion"] == "not-implemented-error-v1"
+        assert body["error"] == "not_implemented"
+        assert body["capability"] == "expand"
     finally:
         server.shutdown()
         server.server_close()
@@ -177,22 +181,71 @@ def test_data_root_lock_fails_fast_for_second_process(tmp_path: Path) -> None:
     second.release()
 
 
-def test_data_root_lock_reaps_stale_lock(tmp_path: Path) -> None:
-    """A lockfile left by a hard-crashed process (dead PID) is reaped; a lock
-    held by a live process raises MemoryLockError."""
+def test_data_root_lock_is_kernel_held_and_fails_fast(tmp_path: Path) -> None:
+    """M1: the lock is an OS kernel lock (flock), not a path-existence check.
+    A second acquire against the same data root must fail fast while the
+    first holder lives; a leftover lockfile with no holder does not block."""
+    from iris_memory.service import MemoryLockError
+
+    first = DataRootLock.acquire(tmp_path)
+    try:
+        with pytest.raises(MemoryLockError):
+            DataRootLock.acquire(tmp_path, timeout_ms=200)
+    finally:
+        first.release()
+    # After release the lock is re-acquirable (even with the file present).
+    second = DataRootLock.acquire(tmp_path, timeout_ms=200)
+    second.release()
+
+
+def test_data_root_lock_diagnostic_pid_is_not_authority(tmp_path: Path) -> None:
+    """M1: PID/host in the lockfile are diagnostic only. A lockfile claiming a
+    dead PID but NOT kernel-locked must be acquirable (the OS lock is the
+    authority, never a PID guess)."""
     lock_path = tmp_path / "memory.lock"
-    # Stale lock: a PID that cannot be alive (huge reserved range is invalid).
     import json as _json
 
-    lock_path.write_text(_json.dumps({"pid": 999999999, "host": "x"}), encoding="utf-8")
-    first = DataRootLock.acquire(tmp_path)
+    lock_path.write_text(_json.dumps({"pid": 999999999, "host": "stale"}), encoding="utf-8")
+    first = DataRootLock.acquire(tmp_path, timeout_ms=200)
     first.release()
-    # Lockfile was reaped and recreated; a second acquire during hold fails.
-    second = DataRootLock.acquire(tmp_path)
-    try:
-        from iris_memory.service import MemoryLockError
 
-        with pytest.raises(MemoryLockError):
-            DataRootLock.acquire(tmp_path)
-    finally:
-        second.release()
+
+def _validate_with_schema(instance: dict[str, object], schema_name: str) -> None:
+    """Validate a runtime payload against the packaged authoritative schema
+    (M2/M3 review): the wire contract is the JSON Schema; the endpoint output
+    must pass it or the service has drifted."""
+    import json
+
+    from jsonschema import Draft202012Validator, FormatChecker
+
+    from iris_memory.contracts.assets import contract_asset
+
+    with contract_asset("schemas", f"{schema_name}.schema.json") as path:
+        schema = json.loads(path.read_text(encoding="utf-8"))
+    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+    errors = list(validator.iter_errors(instance))
+    assert not errors, f"{schema_name} validation failed: {errors}"
+
+
+def test_capabilities_payload_passes_authoritative_schema(tmp_path: Path) -> None:
+    """M2: GET /v1/capabilities output must validate against the packaged
+    capability-handshake-v1 schema (single wire-contract authority)."""
+    from iris_memory.service import build_capabilities
+
+    payload = build_capabilities()
+    _validate_with_schema(payload, "capability-handshake-v1")
+
+
+def test_not_implemented_501_body_passes_authoritative_schema(tmp_path: Path) -> None:
+    """M3: the 501 not-implemented body must validate against the versioned
+    not-implemented-error-v1 schema — never an invalid request-shaped body."""
+    _validate_with_schema(
+        {
+            "schemaVersion": "not-implemented-error-v1",
+            "error": "not_implemented",
+            "code": "not_implemented",
+            "capability": "recall",
+            "message": "recall is not implemented in the R0 baseline",
+        },
+        "not-implemented-error-v1",
+    )
