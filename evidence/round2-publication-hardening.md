@@ -29,19 +29,23 @@ uvx ruff==0.15.22 check .        -> All checks passed!
 uvx ruff==0.15.22 format --check . -> 23 files already formatted
 uvx mypy==2.3.0                  -> Success: no issues found in 15 source files (pyproject [tool.mypy] files=["src"]; tests not in mypy scope, consistent with round 1)
 uv run --with pytest==9.1.1 --with jsonschema==4.26.0 pytest
-                                 -> 36 passed in 1.61s
+                                 -> 38 passed in 1.72s
 ```
 
 Concurrency tests re-run 5x with no flake (default sqlite3 5s busy timeout covers BEGIN IMMEDIATE contention).
 
-The full suite is 36 tests (29 first-round + 7 new hardening tests).
+The full suite is 38 tests (29 first-round + 9 new hardening tests).
 
 Competition matrix added: same key / different payload concurrent (1 Accepted
 + 3 IdempotencyConflict), same publication / different key concurrent (1
-Accepted, ledger keeps one row). The cross-process test now uses a common
-ready/start gate so the four subprocesses genuinely overlap inside the
-BEGIN IMMEDIATE transaction. The crash test is accurately named
-post-commit hard-exit durability (the transaction completes before os._exit).
+Accepted + 3 exact alternate-key replays + 4 idempotency rows + 1 receipt id),
+same source_sequence / different publication concurrent (1 Accepted + 1
+SequenceConflict), and alternate-key replay vs key reuse competitive. The
+cross-process test imports acceptance BEFORE the ready file, so the common
+ready/start gate opens only when all four processes have completed import and
+are genuinely inside the transaction window. The crash test is accurately
+named post-commit hard-exit durability (the transaction completes before
+os._exit).
 
 ## Still not satisfied
 

@@ -90,8 +90,9 @@ def test_concurrent_same_key_threads_accept_exactly_once(tmp_path: Path) -> None
 
 
 def test_concurrent_distinct_keys_both_accepted(tmp_path: Path) -> None:
-    """Distinct idempotency keys for distinct publications both succeed under
-    concurrency; ordering is preserved by source_sequence."""
+    """Distinct idempotency keys for distinct publications all succeed under
+    concurrency. Acceptance is unordered (source_sequence is UNIQUE-constrained,
+    not predecessor-ordered); ordering semantics are out of scope here."""
     database_path = tmp_path / "router.sqlite3"
     apply_migrations(database_path)
     barrier = threading.Barrier(4)
@@ -230,6 +231,7 @@ def test_subprocess_accept_parallel_same_key(tmp_path: Path) -> None:
         f'ready = Path({repr(str(ready_dir))}) / f"{{os.getpid()}}.ready"\n'
         f"start = Path({repr(str(start_file))})\n"
         f"db = Path({db_repr})\n"
+        "from iris_memory.acceptance import accept_publication\n"
         "ready.write_text('ready')\n"
         "deadline = time.time() + 15\n"
         "while not start.exists():\n"
@@ -237,7 +239,6 @@ def test_subprocess_accept_parallel_same_key(tmp_path: Path) -> None:
         "        print('START_TIMEOUT')\n"
         "        sys.exit(2)\n"
         "    time.sleep(0.005)\n"
-        "from iris_memory.acceptance import accept_publication\n"
         f"outcome = accept_publication(db, {request_repr})\n"
         "print(type(outcome).__name__)\n"
     )
@@ -322,14 +323,106 @@ def test_same_publication_different_key_concurrent(tmp_path: Path) -> None:
         req["idempotencyKey"] = f"pub-key-{key_variant}"
         return type(accept_publication(database_path, req)).__name__
 
+    def submit_with_receipt(key_variant: int) -> tuple[str, str | None]:
+        barrier.wait()
+        req = _request()
+        req["idempotencyKey"] = f"pub-key-{key_variant}"
+        outcome = accept_publication(database_path, req)
+        receipt_id: str | None = None
+        if isinstance(outcome, (Accepted, DuplicateReplay)):
+            receipt_id = str(outcome.receipt["receiptId"])
+        return type(outcome).__name__, receipt_id
+
     with ThreadPoolExecutor(max_workers=4) as executor:
-        results = [f.result() for f in [executor.submit(submit, i) for i in range(4)]]
-    assert results.count("Accepted") == 1
-    # The other three either replay (same payload, no row written by them) or
-    # the first writer's alternate key is persisted only if replay. In every
-    # case the ledger keeps exactly one accepted publication.
+        results = [f.result() for f in [executor.submit(submit_with_receipt, i) for i in range(4)]]
+    statuses = [r[0] for r in results]
+    # The same publication + identical payload with different keys must
+    # converge deterministically: exactly one Accepted and the other three
+    # exact alternate-key replays, all sharing ONE receipt id (review
+    # blocker #2, round 2 review).
+    assert statuses.count("Accepted") == 1, statuses
+    assert statuses.count("DuplicateReplay") == 3, statuses
+    receipt_ids = {r[1] for r in results if r[1] is not None}
+    assert len(receipt_ids) == 1, receipt_ids
     accepted = _counts(database_path)
     assert accepted["accepted_publications"] == 1
     assert accepted["acceptance_receipts"] == 1
     assert accepted["ingestion_jobs"] == 1
-    assert accepted["publication_idempotency"] >= 1
+    # Every one of the four distinct keys was persisted (the accepted key
+    # plus the three exact alternate-key replays).
+    assert accepted["publication_idempotency"] == 4, accepted
+
+
+def test_same_source_sequence_different_publication_concurrent(tmp_path: Path) -> None:
+    """Competition matrix: two different publications with the SAME
+    source_sequence submitted concurrently. source_sequence is UNIQUE; exactly
+    one Accepts and the other gets a typed SequenceConflict. This locks the
+    UNIQUE-constraint semantics (not ordered acceptance)."""
+    database_path = tmp_path / "router.sqlite3"
+    apply_migrations(database_path)
+    barrier = threading.Barrier(2)
+
+    def submit(pub_variant: int) -> str:
+        barrier.wait()
+        req = _request()
+        req["idempotencyKey"] = f"seq-key-{pub_variant}"
+        req["publication"] = {
+            **req["publication"],
+            "publicationId": f"4444444{pub_variant}-4444-4444-8444-44444444444{pub_variant}",
+            "summary": f"same-sequence different-publication variant {pub_variant}",
+        }
+        return type(accept_publication(database_path, req)).__name__
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = [f.result() for f in [executor.submit(submit, i) for i in range(2)]]
+    assert results.count("Accepted") == 1, results
+    assert results.count("SequenceConflict") == 1, results
+    accepted = _counts(database_path)
+    assert accepted["accepted_publications"] == 1
+    assert accepted["acceptance_receipts"] == 1
+    assert accepted["ingestion_jobs"] == 1
+
+
+def test_alternate_key_replay_vs_key_reuse_competitive(tmp_path: Path) -> None:
+    """Competition matrix: an exact alternate-key replay (same publication,
+    same payload, a DIFFERENT key) races a new-publication reuse of that key.
+    The winner's outcome must be deterministic: whichever thread first binds
+    the key/publication wins; the loser either replays (same payload) or gets
+    a typed conflict — and the ledger never contains two accepted publications
+    or two bindings of one key."""
+    database_path = tmp_path / "router.sqlite3"
+    apply_migrations(database_path)
+    barrier = threading.Barrier(2)
+
+    def submit_alt_key() -> str:
+        barrier.wait()
+        req = _request()
+        req["idempotencyKey"] = "alt-key-for-pub"
+        return type(accept_publication(database_path, req)).__name__
+
+    def submit_reuse() -> str:
+        barrier.wait()
+        req = _request()
+        req["idempotencyKey"] = "alt-key-for-pub"
+        req["publication"] = {
+            **req["publication"],
+            "publicationId": "55555555-5555-4555-8555-555555555555",
+            "sourceSequence": 7,
+            "summary": "reuse of alt key with a different publication",
+        }
+        return type(accept_publication(database_path, req)).__name__
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = [
+            f.result() for f in [executor.submit(submit_alt_key), executor.submit(submit_reuse)]
+        ]
+    assert results.count("Accepted") == 1, results
+    # The loser is either an exact replay or a typed conflict — never a
+    # second Accepted and never a silent key overwrite.
+    losers = [r for r in results if r != "Accepted"]
+    assert len(losers) == 1, results
+    assert losers[0] in {"DuplicateReplay", "IdempotencyConflict"}, results
+    accepted = _counts(database_path)
+    assert accepted["accepted_publications"] == 1
+    assert accepted["acceptance_receipts"] == 1
+    assert accepted["ingestion_jobs"] == 1
