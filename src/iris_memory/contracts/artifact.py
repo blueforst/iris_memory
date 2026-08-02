@@ -284,7 +284,12 @@ def iter_manifest_files(manifest: dict[str, object]) -> Iterator[str]:
 
 
 def verify_artifact_directory(root: Path) -> tuple[bool, tuple[str, ...]]:
-    """Verify an on-disk artifact directory (as CI unpacks it)."""
+    """Verify an on-disk artifact directory (as CI unpacks it).
+
+    Every file listed in the manifest must exist AND its bytes must hash to
+    the manifest's recorded checksum — a tampered unpacked artifact is
+    detected even when the manifest itself is intact.
+    """
     manifest_path = root / "manifest.json"
     if not manifest_path.exists():
         return (False, ("artifact is missing manifest.json",))
@@ -292,8 +297,32 @@ def verify_artifact_directory(root: Path) -> tuple[bool, tuple[str, ...]]:
     ok_manifest, manifest_errors = verify_manifest(manifest)
     ok_fixtures, fixture_errors = validate_fixtures(manifest)
 
-    missing = [rel for rel in iter_manifest_files(manifest) if not (root / rel).exists()]
-    errors = list(manifest_errors) + list(fixture_errors)
+    checksums = manifest.get("checksums")
+    if not isinstance(checksums, dict):
+        early_errors = list(manifest_errors) + list(fixture_errors)
+        early_errors.append("manifest is missing 'checksums'")
+        return (False, tuple(early_errors))
+
+    errors: list[str] = []
+    missing: list[str] = []
+    content_mismatch: list[str] = []
+    for relative in iter_manifest_files(manifest):
+        target = root / relative
+        if not target.exists():
+            missing.append(relative)
+            continue
+        group = relative.split("/", 1)[0]
+        group_map = checksums.get(group)
+        recorded = group_map.get(relative) if isinstance(group_map, dict) else None
+        if not isinstance(recorded, str):
+            continue
+        actual = file_sha256(target)
+        if actual != recorded:
+            content_mismatch.append(f"{relative} (declared {recorded}, actual {actual})")
     if missing:
         errors.append(f"artifact directory missing files: {missing}")
-    return (ok_manifest and ok_fixtures and not missing, tuple(errors))
+    if content_mismatch:
+        errors.append(f"artifact content checksum mismatch: {content_mismatch}")
+    errors.extend(manifest_errors)
+    errors.extend(fixture_errors)
+    return (ok_manifest and ok_fixtures and not missing and not content_mismatch, tuple(errors))

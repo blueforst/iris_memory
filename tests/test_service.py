@@ -164,12 +164,35 @@ def test_capabilities_handshake_marks_unavailable_explicitly() -> None:
 
 
 def test_data_root_lock_fails_fast_for_second_process(tmp_path: Path) -> None:
+    from iris_memory.service import MemoryLockError
+
     first = DataRootLock.acquire(tmp_path)
     try:
-        with pytest.raises(FileExistsError):
+        with pytest.raises(MemoryLockError):
             DataRootLock.acquire(tmp_path)
     finally:
         first.release()
     # After release the lock can be re-acquired.
     second = DataRootLock.acquire(tmp_path)
     second.release()
+
+
+def test_data_root_lock_reaps_stale_lock(tmp_path: Path) -> None:
+    """A lockfile left by a hard-crashed process (dead PID) is reaped; a lock
+    held by a live process raises MemoryLockError."""
+    lock_path = tmp_path / "memory.lock"
+    # Stale lock: a PID that cannot be alive (huge reserved range is invalid).
+    import json as _json
+
+    lock_path.write_text(_json.dumps({"pid": 999999999, "host": "x"}), encoding="utf-8")
+    first = DataRootLock.acquire(tmp_path)
+    first.release()
+    # Lockfile was reaped and recreated; a second acquire during hold fails.
+    second = DataRootLock.acquire(tmp_path)
+    try:
+        from iris_memory.service import MemoryLockError
+
+        with pytest.raises(MemoryLockError):
+            DataRootLock.acquire(tmp_path)
+    finally:
+        second.release()

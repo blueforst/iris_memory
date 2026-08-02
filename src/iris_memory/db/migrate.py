@@ -102,14 +102,35 @@ def apply_migrations(database_path: Path, *, migrations_dir: Path | None = None)
         _ensure_checksum_column(connection)
         recorded = _recorded_migrations(connection)
 
+        # MAJOR#2 (review): pre-round-3 rows have checksum ''. Backfill the
+        # current checksum (a documented blessing of unknown history) so
+        # future tampering is detected. Runs OUTSIDE the per-migration BEGIN
+        # (python sqlite3 autocommits this standalone UPDATE).
         sources = _migration_sources(migrations_dir)
+        source_checksums = {name.removesuffix(".sql"): _sha256(sql) for name, sql in sources}
+        backfilled_any = False
+        for version, recorded_checksum in recorded.items():
+            current_checksum = source_checksums.get(version)
+            if recorded_checksum == "" and current_checksum is not None:
+                connection.execute(
+                    "UPDATE schema_migrations SET checksum = ? WHERE version = ?",
+                    (current_checksum, version),
+                )
+                recorded[version] = current_checksum
+                backfilled_any = True
+        # Commit the standalone backfill so the per-migration BEGIN below
+        # never collides with python sqlite3's implicit transaction.
+        if backfilled_any:
+            connection.commit()
 
         for migration_name, sql in sources:
             version = migration_name.removesuffix(".sql")
             checksum = _sha256(sql)
-            recorded_checksum = recorded.get(version)
-            if recorded_checksum is not None:
-                if recorded_checksum != "" and recorded_checksum != checksum:
+            if version in recorded:
+                # Empty checksums were backfilled in the pass above; any
+                # remaining non-empty mismatch is a real drift.
+                recorded_checksum = recorded[version]
+                if recorded_checksum != checksum:
                     raise MigrationChecksumError(
                         f"migration {version} changed after being applied "
                         f"(recorded {recorded_checksum}, current {checksum})"

@@ -281,3 +281,47 @@ def test_migration_reapply_is_idempotent_across_restart(tmp_path: Path) -> None:
             "SELECT checksum FROM schema_migrations WHERE version='0001_first'"
         ).fetchone()
     assert checksum is not None and checksum[0] != ""
+
+
+def test_legacy_empty_checksum_is_backfilled_on_next_run(tmp_path: Path) -> None:
+    """MAJOR#2 (review): a pre-round-3 database whose checksum column was
+    added as '' must have the real checksum backfilled on the next run so
+    subsequent tampering of that migration is detected."""
+    data_root = tmp_path / "memory"
+    database_path = data_root / "router.sqlite3"
+    migrations_dir = data_root / "migrations"
+    migrations_dir.mkdir(parents=True)
+    (migrations_dir / "0001_first.sql").write_text(
+        "CREATE TABLE t (id INTEGER PRIMARY KEY);",
+        encoding="utf-8",
+    )
+
+    apply_migrations(database_path, migrations_dir=migrations_dir)
+
+    # Simulate a legacy row: blank the checksum (as the pre-round-3 backfill
+    # would have left it).
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "UPDATE schema_migrations SET checksum = '' WHERE version = '0001_first'"
+        )
+    with sqlite3.connect(database_path) as connection:
+        checksum = connection.execute(
+            "SELECT checksum FROM schema_migrations WHERE version='0001_first'"
+        ).fetchone()
+    assert checksum is not None and checksum[0] == ""
+
+    # Next run backfills the real checksum.
+    apply_migrations(database_path, migrations_dir=migrations_dir)
+    with sqlite3.connect(database_path) as connection:
+        checksum = connection.execute(
+            "SELECT checksum FROM schema_migrations WHERE version='0001_first'"
+        ).fetchone()
+    assert checksum is not None and checksum[0] != ""
+
+    # Now tampering the applied migration IS detected (fail-closed restored).
+    (migrations_dir / "0001_first.sql").write_text(
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, extra TEXT);",
+        encoding="utf-8",
+    )
+    with pytest.raises(MigrationChecksumError):
+        apply_migrations(database_path, migrations_dir=migrations_dir)
