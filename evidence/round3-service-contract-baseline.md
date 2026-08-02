@@ -76,8 +76,8 @@ receipt.
 
 ```text
 serviceVersion, contractPackage, contractVersion, contractVersions,
-supportedMajor=0, supportedMinor=1, manifestSha256, schemaCount=13,
-fixtureCount=28, capabilities=[publication.accept, capability.handshake,
+supportedMajor=0, supportedMinor=1, manifestSha256, schemaCount=14,
+fixtureCount=30, capabilities=[publication.accept, capability.handshake,
 health.read], unavailableCapabilities=[graphiti.ingest, recall, expand,
 reindex, stableMemoryRef], graphitiStatus=not_configured,
 readiness=ready, degradedReasons=[graphiti_not_configured,
