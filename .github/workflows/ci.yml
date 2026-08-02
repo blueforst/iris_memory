@@ -42,3 +42,28 @@ jobs:
           version: "0.11.32"
           enable-cache: true
       - run: uv run --isolated --with graphiti-core==0.29.2 python -c "from importlib.metadata import version; assert version('graphiti-core') == '0.29.2'"
+
+  artifact:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.32"
+          enable-cache: true
+      - run: uv sync --locked
+      # Build the contract artifact into an isolated temp dir, then verify the
+      # unpacked artifact in place (manifest checksums, schema/fixture lists,
+      # valid/invalid fixture re-validation, manifestSha256 recomputation).
+      - run: |
+          uv run --with jsonschema==4.26.0 iris-memory contract build --output-dir "$RUNNER_TEMP/artifact"
+          uv run --with jsonschema==4.26.0 iris-memory contract verify \
+            --manifest "$RUNNER_TEMP/artifact/manifest.json" \
+            --dir "$RUNNER_TEMP/artifact"
+      # Prove the artifact builds deterministically (byte-reproducible).
+      - run: |
+          uv run --with jsonschema==4.26.0 iris-memory contract build --output-dir "$RUNNER_TEMP/artifact2"
+          diff -r "$RUNNER_TEMP/artifact" "$RUNNER_TEMP/artifact2"

@@ -4,5 +4,6 @@
   "status": "broken",
   "capabilities": [
     "health.read"
-  ]
+  ],
+  "schemaVersion": "capability-handshake-v2"
 }
