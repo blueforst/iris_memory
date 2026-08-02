@@ -1,6 +1,7 @@
 -- 0003: rebuild publication_idempotency without the publication_id UNIQUE
 -- constraint so a single accepted publication can bind multiple consumed
--- idempotency keys (alternate-key replay and conflict consumption).
+-- idempotency keys (accepted and exact alternate-key replay persist the key;
+-- typed conflicts return before any key write).
 
 CREATE TABLE publication_idempotency_rebuild (
     idempotency_key TEXT PRIMARY KEY,
