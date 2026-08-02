@@ -9,7 +9,7 @@
 - OpenAPI 3.1 文档覆盖 health、publication、recall、expand 四个路径；该文档是 candidate/descriptive 描述，权威契约始终是 `manifest.json` 中登记的 JSON Schema，禁止把 OpenAPI 当作第二权威源；
 - `0002_router_ledger` forward-only migration：accepted publications、publication idempotency、acceptance receipts、evidence envelopes、ordered ingestion jobs、service metadata；
 - Publication acceptance vertical slice：schema validation -> major/minor version check -> canonical payload hash -> idempotency -> 单事务原子持久化 -> 确定性 receipt；
-- 幂等消费边界：首次接受、同 key 重放、alternate key replay/conflict 都会把该 idempotency key 持久化消费，防止已被消费的 key 被后续不同 publication 复用；
+- 幂等消费边界：首次接受与同 key 重放持久化消费该 idempotency key；alternate-key replay（同 publication 同 hash、不同 key）也会持久化该 key；typed conflict（key 复用不同内容 / sequence 冲突）在分类前返回，不写入无 receipt 的 idempotency key；
 - stdlib HTTP surface：`GET /health`、`POST /historian/publications`；recall/expand 明确返回 `501 not_implemented`；
 - CLI：`migrate`、`check`、`accept`、`serve`；
 - health 明确返回 `bootstrap` 或 `degraded`，Graphiti 始终为 `not_configured`，不会伪装成完整 ready。

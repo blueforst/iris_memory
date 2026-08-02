@@ -6,6 +6,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -169,10 +170,12 @@ def test_same_key_reused_with_different_publication_after_concurrency(
     }
 
 
-def test_crash_during_commit_recovers_consistently(tmp_path: Path) -> None:
-    """A real crash after a durable commit: a subprocess accepts, then is
-    killed with os._exit(0) immediately after the transaction committed.
-    On restart the committed row is visible and replay is idempotent."""
+def test_post_commit_hard_exit_durability(tmp_path: Path) -> None:
+    """Post-commit hard-exit durability: a subprocess accepts, then hard-exits
+    with os._exit(0) immediately after the commit returned (no clean
+    interpreter shutdown). A restart sees the durable row and replay is
+    idempotent. This is NOT a mid-commit crash test — the transaction
+    completed before the exit."""
     database_path = tmp_path / "router.sqlite3"
     apply_migrations(database_path)
     db_repr = repr(str(database_path))
@@ -208,18 +211,37 @@ def test_crash_during_commit_recovers_consistently(tmp_path: Path) -> None:
 
 def test_subprocess_accept_parallel_same_key(tmp_path: Path) -> None:
     """Cross-process concurrency: several OS processes race the same key. The
-    BEGIN IMMEDIATE transaction serializes writers; exactly one Accepted."""
+    BEGIN IMMEDIATE transaction serializes writers; exactly one Accepted.
+
+    A common-start gate (ready file per process, then a single start file)
+    guarantees the four subprocesses are all alive and past import before
+    any of them enters the transaction, so a genuine write-write overlap is
+    exercised rather than sequential replay."""
     database_path = tmp_path / "router.sqlite3"
     apply_migrations(database_path)
     db_repr = repr(str(database_path))
     request_repr = repr(_request())
+    ready_dir = tmp_path / "ready"
+    start_file = tmp_path / "start"
+    ready_dir.mkdir()
     script = (
-        "from iris_memory.acceptance import accept_publication\n"
+        "import os, sys, time\n"
         "from pathlib import Path\n"
-        f"outcome = accept_publication(Path({db_repr}), {request_repr})\n"
+        f'ready = Path({repr(str(ready_dir))}) / f"{{os.getpid()}}.ready"\n'
+        f"start = Path({repr(str(start_file))})\n"
+        f"db = Path({db_repr})\n"
+        "ready.write_text('ready')\n"
+        "deadline = time.time() + 15\n"
+        "while not start.exists():\n"
+        "    if time.time() > deadline:\n"
+        "        print('START_TIMEOUT')\n"
+        "        sys.exit(2)\n"
+        "    time.sleep(0.005)\n"
+        "from iris_memory.acceptance import accept_publication\n"
+        f"outcome = accept_publication(db, {request_repr})\n"
         "print(type(outcome).__name__)\n"
     )
-    # Spawn all four processes before waiting, so they genuinely race.
+    # Spawn all four processes; each reports ready before the gate opens.
     procs = [
         subprocess.Popen(
             [sys.executable, "-c", script],
@@ -229,6 +251,15 @@ def test_subprocess_accept_parallel_same_key(tmp_path: Path) -> None:
         )
         for _ in range(4)
     ]
+    deadline = time.monotonic() + 15
+    while len(list(ready_dir.glob("*.ready"))) < 4:
+        if time.monotonic() > deadline:
+            for proc in procs:
+                proc.kill()
+            raise AssertionError("subprocesses did not all report ready")
+        time.sleep(0.005)
+    # Open the common start gate: every process is alive and past import.
+    start_file.write_text("go")
     statuses = []
     for proc in procs:
         out, _ = proc.communicate()
@@ -243,3 +274,62 @@ def test_subprocess_accept_parallel_same_key(tmp_path: Path) -> None:
         "acceptance_receipts": 1,
         "ingestion_jobs": 1,
     }
+
+
+def test_same_key_different_payload_concurrent_conflicts(tmp_path: Path) -> None:
+    """Competition matrix: same idempotency key submitted concurrently with
+    different payloads. BEGIN IMMEDIATE serializes; exactly one Accepts and
+    every other thread gets a typed IdempotencyConflict (no key persisted for
+    the losers beyond the winner's row)."""
+    database_path = tmp_path / "router.sqlite3"
+    apply_migrations(database_path)
+    barrier = threading.Barrier(4)
+
+    def submit(variant: int) -> str:
+        barrier.wait()
+        req = _request()
+        req["publication"] = {
+            **req["publication"],
+            "publicationId": f"3333333{variant}-3333-4333-8333-33333333333{variant}",
+            "summary": f"same-key different-payload variant {variant}",
+        }
+        return type(accept_publication(database_path, req)).__name__
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = [f.result() for f in [executor.submit(submit, i) for i in range(4)]]
+    assert results.count("Accepted") == 1
+    assert results.count("IdempotencyConflict") == 3
+    assert _counts(database_path) == {
+        "accepted_publications": 1,
+        "publication_idempotency": 1,
+        "acceptance_receipts": 1,
+        "ingestion_jobs": 1,
+    }
+
+
+def test_same_publication_different_key_concurrent(tmp_path: Path) -> None:
+    """Competition matrix: the same publication_id submitted concurrently with
+    different idempotency keys. Exactly one Accepts (first writer wins); the
+    others replay or conflict deterministically, and the ledger never holds
+    more than one accepted row for the publication."""
+    database_path = tmp_path / "router.sqlite3"
+    apply_migrations(database_path)
+    barrier = threading.Barrier(4)
+
+    def submit(key_variant: int) -> str:
+        barrier.wait()
+        req = _request()
+        req["idempotencyKey"] = f"pub-key-{key_variant}"
+        return type(accept_publication(database_path, req)).__name__
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = [f.result() for f in [executor.submit(submit, i) for i in range(4)]]
+    assert results.count("Accepted") == 1
+    # The other three either replay (same payload, no row written by them) or
+    # the first writer's alternate key is persisted only if replay. In every
+    # case the ledger keeps exactly one accepted publication.
+    accepted = _counts(database_path)
+    assert accepted["accepted_publications"] == 1
+    assert accepted["acceptance_receipts"] == 1
+    assert accepted["ingestion_jobs"] == 1
+    assert accepted["publication_idempotency"] >= 1
