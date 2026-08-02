@@ -174,5 +174,5 @@ Audited head `571de1d` by an independent reviewer; all merge blockers fixed:
   schemas (a consumer with only the artifact reaches the same verdict).
   `write_contract_artifact` refuses a non-empty output directory.
 
-Test count: 68 pytest (round-2 40 + artifact 9 + service 9 + migrations 8 +
-process 3 - legacy 1 merged). ruff/mypy/format clean.
+Test count: 69 pytest (round-2 40 + artifact 9 + service 9 + migrations 8 +
+process 3). ruff/mypy/format clean.
