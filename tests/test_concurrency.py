@@ -384,45 +384,76 @@ def test_same_source_sequence_different_publication_concurrent(tmp_path: Path) -
 
 
 def test_alternate_key_replay_vs_key_reuse_competitive(tmp_path: Path) -> None:
-    """Competition matrix: an exact alternate-key replay (same publication,
-    same payload, a DIFFERENT key) races a new-publication reuse of that key.
-    The winner's outcome must be deterministic: whichever thread first binds
-    the key/publication wins; the loser either replays (same payload) or gets
-    a typed conflict — and the ledger never contains two accepted publications
-    or two bindings of one key."""
+    """Competition matrix: after P(K1) is accepted, an exact alternate-key
+    replay P(K2) races a different-publication reuse Q(K2) of that same key.
+
+    Legal outcomes (both must be locked):
+      - P(K2) binds first  -> DuplicateReplay(P) + IdempotencyConflict(Q),
+                             accepted publications = 1
+      - Q(K2) binds first  -> Accepted(Q) + IdempotencyConflict(P replay),
+                             accepted publications = 2
+
+    In both cases: one key has exactly one binding, P's original receipt is
+    unchanged, and there is no half-accept or silent overwrite."""
     database_path = tmp_path / "router.sqlite3"
     apply_migrations(database_path)
-    barrier = threading.Barrier(2)
 
-    def submit_alt_key() -> str:
-        barrier.wait()
-        req = _request()
-        req["idempotencyKey"] = "alt-key-for-pub"
-        return type(accept_publication(database_path, req)).__name__
+    # Establish the prior state: accept P(K1) first.
+    first = _request()  # publication P with key K1 ("concurrent-key")
+    first_outcome = accept_publication(database_path, first)
+    assert isinstance(first_outcome, Accepted)
+    first_receipt = str(first_outcome.receipt["receiptId"])
 
-    def submit_reuse() -> str:
-        barrier.wait()
-        req = _request()
-        req["idempotencyKey"] = "alt-key-for-pub"
-        req["publication"] = {
-            **req["publication"],
-            "publicationId": "55555555-5555-4555-8555-555555555555",
-            "sourceSequence": 7,
-            "summary": "reuse of alt key with a different publication",
-        }
-        return type(accept_publication(database_path, req)).__name__
+    alt_p = dict(first)
+    alt_p["idempotencyKey"] = "alt-key-for-pub"  # P(K2): exact alternate replay
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        results = [
-            f.result() for f in [executor.submit(submit_alt_key), executor.submit(submit_reuse)]
-        ]
-    assert results.count("Accepted") == 1, results
-    # The loser is either an exact replay or a typed conflict — never a
-    # second Accepted and never a silent key overwrite.
-    losers = [r for r in results if r != "Accepted"]
-    assert len(losers) == 1, results
-    assert losers[0] in {"DuplicateReplay", "IdempotencyConflict"}, results
-    accepted = _counts(database_path)
-    assert accepted["accepted_publications"] == 1
-    assert accepted["acceptance_receipts"] == 1
-    assert accepted["ingestion_jobs"] == 1
+    reuse_q = dict(first)
+    reuse_q["idempotencyKey"] = "alt-key-for-pub"  # Q(K2): same key, different pub
+    reuse_q["publication"] = {
+        **reuse_q["publication"],
+        "publicationId": "55555555-5555-4555-8555-555555555555",
+        "sourceSequence": 7,
+        "summary": "reuse of alt key with a different publication",
+    }
+
+    for attempt in range(8):  # run the race repeatedly to cover both winners
+        db = tmp_path / f"router-race-{attempt}.sqlite3"
+        apply_migrations(db)
+        out1 = accept_publication(db, first)
+        assert isinstance(out1, Accepted)
+        barrier = threading.Barrier(2)
+
+        def run_alt(db_arg: Path = db, barrier_arg: threading.Barrier = barrier) -> str:
+            barrier_arg.wait()
+            return type(accept_publication(db_arg, alt_p)).__name__
+
+        def run_reuse(db_arg: Path = db, barrier_arg: threading.Barrier = barrier) -> str:
+            barrier_arg.wait()
+            return type(accept_publication(db_arg, reuse_q)).__name__
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = [f.result() for f in [executor.submit(run_alt), executor.submit(run_reuse)]]
+        statuses = sorted(results)
+
+        if statuses == ["DuplicateReplay", "IdempotencyConflict"]:
+            # P(K2) bound first: exact replay, Q conflicts.
+            assert _counts(db)["accepted_publications"] == 1
+        elif statuses == ["Accepted", "IdempotencyConflict"]:
+            # Q(K2) bound first: Q accepted, P(K2) replay conflicts.
+            assert _counts(db)["accepted_publications"] == 2
+        else:
+            raise AssertionError(f"unexpected race outcome {statuses}")
+
+        # One key -> exactly one binding; P's receipt unchanged in every case.
+        with sqlite3.connect(db) as conn:
+            rows = conn.execute(
+                "SELECT COUNT(*) FROM publication_idempotency WHERE idempotency_key = ?",
+                ("alt-key-for-pub",),
+            ).fetchone()
+            assert rows is not None and rows[0] == 1, "alt key must have exactly one binding"
+            p_receipt = conn.execute(
+                "SELECT receipt_id FROM accepted_publications WHERE publication_id = ?",
+                (str(first["publication"]["publicationId"]),),
+            ).fetchone()
+            assert p_receipt is not None
+            assert str(p_receipt[0]) == first_receipt, "P's receipt must be unchanged"

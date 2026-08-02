@@ -42,8 +42,10 @@ Accepted + 3 exact alternate-key replays + 4 idempotency rows + 1 receipt id),
 same source_sequence / different publication concurrent (1 Accepted + 1
 SequenceConflict), and alternate-key replay vs key reuse competitive. The
 cross-process test imports acceptance BEFORE the ready file, so the common
-ready/start gate opens only when all four processes have completed import and
-are genuinely inside the transaction window. The crash test is accurately
+ready/start gate opens only after all four processes completed import: this is
+a synchronized post-import start / contention attempt (it does not claim to
+prove OS-level overlap inside the BEGIN IMMEDIATE transaction — that would
+require a fault-injection hook inside the production function). The crash test is accurately
 named post-commit hard-exit durability (the transaction completes before
 os._exit).
 
