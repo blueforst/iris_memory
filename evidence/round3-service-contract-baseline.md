@@ -32,7 +32,7 @@ directories and re-validates every valid/invalid fixture.
 Commands (run locally):
 
 ```text
-uv run --with jsonschema==4.26.0 iris-memory contract build --output-dir artifacts/iris-memory-contracts-0.1.0
+uv run --with jsonschema==4.26.0 iris-memory contract build --output-dir artifacts/iris-memory-contracts-0.1.1
 uv run --with jsonschema==4.26.0 iris-memory contract verify --manifest artifacts/.../manifest.json --dir artifacts/...
 ```
 
@@ -48,14 +48,14 @@ artifact in place, plus a byte-reproducibility diff.
 
 ```text
 iris-memory serve
--> acquire <data-root>/memory.lock (O_EXCL, full lifetime)
+-> acquire <data-root>/memory.lock (kernel-held flock/msvcrt, persistent inode, full lifetime)
 -> apply migrations (checksum-verified)
 -> start loopback HTTP (default 127.0.0.1:18011)
 -> report health/capabilities
 -> remain alive until interrupted; lock released on shutdown
 ```
 
-A second process against the same data root fails fast (`FileExistsError`).
+A second process against the same data root fails fast (`MemoryLockError`; the OS lock is authoritative, PID is diagnostic only).
 Endpoints:
 
 ```text
@@ -72,7 +72,7 @@ receipt.
 
 ## Capability/version handshake
 
-`GET /v1/capabilities` returns (capability-handshake-v1):
+`GET /v1/capabilities` returns (capability-handshake-v2):
 
 ```text
 serviceVersion, contractPackage, contractVersion, contractVersions,
@@ -99,7 +99,7 @@ migration:
 - re-running is idempotent and keeps checksum records;
 - backfill adds the checksum column to pre-round-3 databases.
 
-Existing 0001-0003 migrations are unchanged (forward-only; no edits).
+Migration checksum bookkeeping is introduced by forward migration 0004 (no runtime ALTER); 0001-0003 are unchanged.
 
 ## Verification
 
@@ -143,7 +143,7 @@ Audited head `571de1d` by an independent reviewer; all merge blockers fixed:
   kernel-lock fail-fast, PID-not-authority. Real subprocess tests prove
   second-process rejection, hard-exit (SIGKILL) restart with kernel auto-
   release, and graceful reopen.
-- **M2 — handshake ↔ schema alignment**: `capability-handshake-v1.schema.json`
+- **M2 — handshake ↔ schema alignment**: `capability-handshake-v2.schema.json`
   now describes the REAL runtime payload (schemaVersion/serviceName/
   serviceVersion/contractPackage/contractVersion/contractVersions/
   supportedMajor/supportedMinor/manifestSha256/schemaCount/fixtureCount/

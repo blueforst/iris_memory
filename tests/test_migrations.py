@@ -390,3 +390,66 @@ def test_legacy_empty_checksum_without_release_manifest_fails_closed(tmp_path: P
     (migrations_dir / "checksums.json").unlink()
     with pytest.raises(MigrationChecksumError, match="release manifest mismatch"):
         apply_migrations(database_path, migrations_dir=migrations_dir)
+
+
+def test_legacy_baselines_backfill_all_checksums_in_one_apply(tmp_path: Path) -> None:
+    """review-pass-3 #1: a legacy DB (checksum column absent) at ANY pre-0004
+    baseline must, after ONE apply_migrations() call, have a non-empty
+    checksum for EVERY recorded version — including migrations applied in the
+    same run right before 0004 (0003)."""
+    import importlib.resources
+
+    source_dir = importlib.resources.files("iris_memory.db.migrations")
+    packaged = {
+        p.name.removesuffix(".sql"): p.read_text(encoding="utf-8")
+        for p in sorted(source_dir.glob("*.sql"))
+    }
+    baseline_order = ["0001_bootstrap", "0002_router_ledger", "0003_router_idempotency_rebuild"]
+
+    for stop in (1, 2, 3):
+        data_root = tmp_path / f"baseline_{stop}"
+        database_path = data_root / "router.sqlite3"
+        data_root.mkdir(parents=True)
+        # Build a TRUE legacy DB: schema_migrations WITHOUT the checksum
+        # column, and only `stop` migrations recorded.
+        # Build a true legacy DB: run the baseline migrations' SQL directly
+        # (creating the real business tables), plus a schema_migrations table
+        # WITHOUT the checksum column recording exactly `stop` versions.
+        with sqlite3.connect(database_path) as connection:
+            for name in baseline_order[:stop]:
+                for statement in [
+                    part.strip() for part in packaged[name].split(";") if part.strip()
+                ]:
+                    connection.execute(statement)
+            connection.execute(
+                "CREATE TABLE schema_migrations "
+                "(version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
+            )
+            for name in baseline_order[:stop]:
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (name, "2026-08-01T00:00:00Z"),
+                )
+        assert "checksum" not in {
+            row[1]
+            for row in sqlite3.connect(database_path)
+            .execute("PRAGMA table_info(schema_migrations)")
+            .fetchall()
+        }
+
+        # Run the REAL packaged migrations (0004 included) ONCE.
+        from iris_memory.db import apply_migrations
+
+        apply_migrations(database_path)
+        with sqlite3.connect(database_path) as connection:
+            rows = connection.execute(
+                "SELECT version, checksum FROM schema_migrations ORDER BY version"
+            ).fetchall()
+        assert [r[0] for r in rows] == [
+            "0001_bootstrap",
+            "0002_router_ledger",
+            "0003_router_idempotency_rebuild",
+            "0004_checksum_metadata",
+        ]
+        for version, checksum in rows:
+            assert checksum != "", f"{version} checksum must be non-empty after ONE apply"

@@ -165,13 +165,13 @@ def apply_migrations(database_path: Path, *, migrations_dir: Path | None = None)
                     f"migration {version} bytes do not match its release-owned checksum"
                 )
 
-        # Backfill pass for legacy rows (checksum ''): happens BEFORE the
-        # per-migration loop. On a legacy DB the checksum column may not exist
-        # yet (0004 not applied); those UPDATEs are deferred to the post-0004
-        # pass so the FIRST run already persists every historical checksum
-        # (review-pass-2 #3).
+        # review-pass-2 #3 + review-pass-3 #1: pre-round-3 rows (checksum '')
+        # that predate the checksum column are collected so they can be
+        # backfilled from the release manifest; when the column does not exist
+        # yet (0004 not applied) they are DEFERRED to the post-0004 pass,
+        # which backfills EVERY empty row — including migrations applied
+        # between 0003 and 0004 that were inserted without a checksum.
         deferred_backfill: list[tuple[str, str]] = []
-        backfilled_any = False
         columns = {
             row[1] for row in connection.execute("PRAGMA table_info(schema_migrations)").fetchall()
         }
@@ -189,11 +189,10 @@ def apply_migrations(database_path: Path, *, migrations_dir: Path | None = None)
                         "UPDATE schema_migrations SET checksum = ? WHERE version = ?",
                         (release_checksum, version),
                     )
-                    backfilled_any = True
                 else:
                     deferred_backfill.append((version, release_checksum))
                 recorded[version] = release_checksum
-        if backfilled_any:
+        if has_checksum_column and any(v == "" for v in recorded.values()):
             connection.commit()
 
         for migration_name, sql in sources:
@@ -250,18 +249,41 @@ def apply_migrations(database_path: Path, *, migrations_dir: Path | None = None)
             applied.append(version)
             recorded[version] = checksum
 
-            # review-pass-2 #3: if this migration introduced the checksum
-            # column (0004), immediately persist the deferred legacy
-            # backfills in the SAME run — the first apply must already leave
-            # every historical checksum non-empty.
-            if version == "0004_checksum_metadata" and deferred_backfill:
+            # review-pass-2 #3 + review-pass-3 #1: if this migration
+            # introduced the checksum column (0004), backfill EVERY empty
+            # checksum row in the SAME transaction/run — the deferred legacy
+            # rows AND any migration applied just before 0004 (e.g. 0003)
+            # that was inserted without a checksum because the column did not
+            # exist yet. A single apply_migrations() therefore leaves ALL
+            # historical checksums non-empty; a crash between the 0004 commit
+            # and this backfill is deterministically completed by the next
+            # run (empty rows are re-backfilled from the manifest).
+            if version == "0004_checksum_metadata" and (
+                deferred_backfill or any(v == "" for v in recorded.values())
+            ):
+                # Backfill EVERY row whose DB checksum is still '' (the
+                # deferred legacy rows AND migrations applied in this run
+                # before the column existed, e.g. 0003). Read the DB value —
+                # not the in-memory `recorded` map, which was pre-populated
+                # with release checksums — so the FIRST run persists all of
+                # them.
                 connection.execute("BEGIN")
                 try:
-                    for legacy_version, legacy_checksum in deferred_backfill:
+                    empty_rows = connection.execute(
+                        "SELECT version FROM schema_migrations WHERE checksum = ''"
+                    ).fetchall()
+                    for (legacy_version,) in empty_rows:
+                        release_checksum = release_checksums.get(legacy_version)
+                        if release_checksum is None:
+                            raise MigrationChecksumError(
+                                f"migration {legacy_version} has no release-owned "
+                                "checksum; an explicit audited migration is required"
+                            )
                         connection.execute(
                             "UPDATE schema_migrations SET checksum = ? WHERE version = ?",
-                            (legacy_checksum, legacy_version),
+                            (release_checksum, legacy_version),
                         )
+                        recorded[legacy_version] = release_checksum
                     connection.commit()
                 except sqlite3.Error:
                     connection.rollback()

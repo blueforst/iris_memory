@@ -339,25 +339,40 @@ def verify_artifact_directory(root: Path) -> tuple[bool, tuple[str, ...]]:
         "openapi": declared_openapi_list,
     }
 
-    # M6 / review-pass-2 #6: reject EXTRA files not listed in the manifest —
-    # in the three content groups AND at the artifact root (a complete
-    # artifact is exactly the manifest surface; the only allowed root file is
-    # manifest.json itself).
+    # M6 / review-pass-2 #6 / review-pass-3 #2: the artifact is EXACTLY its
+    # manifest surface — recursively. Everything under the root must be:
+    #   - manifest.json (root file),
+    #   - the three declared groups (schemas/fixtures/openapi), each
+    #     containing ONLY the flat files the manifest lists — no nested
+    #     directories, no extra files, no symlinks (flat layout is verified).
     extra: list[str] = []
     for path in root.iterdir():
-        if path.is_file() and path.name != "manifest.json":
-            extra.append(path.name)
-    for group in ("schemas", "fixtures", "openapi"):
-        group_dir = root / group
-        if not group_dir.is_dir():
+        if path.name == "manifest.json":
             continue
-        for path in group_dir.iterdir():
-            if path.is_file():
-                relative = f"{group}/{path.name}"
-                if relative not in declared_all:
-                    extra.append(relative)
+        if path.is_symlink():
+            extra.append(f"{path.name} (symlink)")
+            continue
+        if path.is_file():
+            extra.append(path.name)
+            continue
+        if path.is_dir():
+            if path.name not in ("schemas", "fixtures", "openapi"):
+                extra.append(f"{path.name}/ (undeclared directory)")
+                continue
+            group = path.name
+            for nested in path.rglob("*"):
+                if nested.is_symlink():
+                    extra.append(f"{group}/{nested.relative_to(path)} (symlink)")
+                    continue
+                if nested.is_dir():
+                    extra.append(f"{group}/{nested.relative_to(path)}/ (nested directory)")
+                    continue
+                if nested.is_file():
+                    relative = f"{group}/{nested.name}"
+                    if relative not in declared_all:
+                        extra.append(relative)
     if extra:
-        errors.append(f"artifact directory contains files not in the manifest: {sorted(extra)}")
+        errors.append(f"artifact directory contains entries not in the manifest: {sorted(extra)}")
 
     # M6: every declared file must exist AND hash to the recorded checksum.
     missing: list[str] = []
