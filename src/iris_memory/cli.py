@@ -65,47 +65,6 @@ def _outcome_as_dict(outcome: AcceptanceOutcome) -> dict[str, object]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    config = MemoryServiceConfig.from_data_root(
-        args.data_root,
-        database_path=getattr(args, "database_path", None),
-    )
-
-    if args.command == "migrate":
-        config.ensure_directories()
-        result = apply_migrations(config.database_path)
-        print(
-            json.dumps(
-                {
-                    "databasePath": str(result.database_path),
-                    "appliedVersions": result.applied_versions,
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-            )
-        )
-        return 0
-
-    if args.command == "check":
-        report = build_health_report(config.database_path)
-        print(json.dumps(report.as_dict(), ensure_ascii=False, sort_keys=True))
-        return 0
-
-    if args.command == "accept":
-        request = json.loads(args.request_file.read_text(encoding="utf-8"))
-        outcome = accept_publication(config.database_path, request)
-        print(json.dumps(_outcome_as_dict(outcome), ensure_ascii=False, sort_keys=True))
-        return 0 if isinstance(outcome, (Accepted, DuplicateReplay)) else 1
-
-    if args.command == "serve":
-        from iris_memory.service import serve as serve_service
-
-        serve_service(
-            config,
-            host=args.host,
-            port=args.port,
-        )
-        return 0
-
     if args.command == "contract":
         from iris_memory.contracts.artifact import (
             build_artifact_manifest,
@@ -147,5 +106,46 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
             return 0 if ok else 1
+
+    config = MemoryServiceConfig.from_data_root(
+        args.data_root,
+        database_path=getattr(args, "database_path", None),
+    )
+
+    if args.command == "migrate":
+        config.ensure_directories()
+        result = apply_migrations(config.database_path)
+        print(
+            json.dumps(
+                {
+                    "databasePath": str(result.database_path),
+                    "appliedVersions": result.applied_versions,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        return 0
+
+    if args.command == "check":
+        report = build_health_report(config.database_path)
+        print(json.dumps(report.as_dict(), ensure_ascii=False, sort_keys=True))
+        return 0
+
+    if args.command == "accept":
+        request = json.loads(args.request_file.read_text(encoding="utf-8"))
+        outcome = accept_publication(config.database_path, request)
+        print(json.dumps(_outcome_as_dict(outcome), ensure_ascii=False, sort_keys=True))
+        return 0 if isinstance(outcome, (Accepted, DuplicateReplay)) else 1
+
+    if args.command == "serve":
+        from iris_memory.service import serve as serve_service
+
+        serve_service(
+            config,
+            host=args.host,
+            port=args.port,
+        )
+        return 0
 
     raise AssertionError(f"unhandled command: {args.command}")
