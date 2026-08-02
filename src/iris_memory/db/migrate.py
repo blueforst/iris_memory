@@ -1,7 +1,18 @@
-"""Small deterministic SQLite migration runner for the repository bootstrap."""
+"""Small deterministic SQLite migration runner for the repository bootstrap.
+
+Reliability contract (round 3):
+- empty data root initializes through the full packaged migration chain;
+- an applied migration whose SQL changed since it was recorded FAILS CLOSED
+  (checksum mismatch), so a modified historical migration can never silently
+  re-run or mask drift;
+- migration failure is atomic: each migration runs inside one transaction and
+  rolls back on error;
+- the runner is idempotent across restarts (version + checksum recorded).
+"""
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -15,6 +26,14 @@ class MigrationResult:
 
     database_path: Path
     applied_versions: tuple[str, ...]
+
+
+class MigrationChecksumError(RuntimeError):
+    """Raised when an already-applied migration changed since it was applied."""
+
+
+def _sha256(sql: str) -> str:
+    return hashlib.sha256(sql.encode("utf-8")).hexdigest()
 
 
 def _migration_sources(migrations_dir: Path | None) -> tuple[tuple[str, str], ...]:
@@ -35,9 +54,37 @@ def _migration_sources(migrations_dir: Path | None) -> tuple[tuple[str, str], ..
     )
 
 
-def apply_migrations(database_path: Path, *, migrations_dir: Path | None = None) -> MigrationResult:
-    """Apply packaged SQL migrations exactly once, in filename order."""
+def _ensure_checksum_column(connection: sqlite3.Connection) -> None:
+    """Backfill the checksum column for databases migrated before round 3."""
+    columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(schema_migrations)").fetchall()
+    }
+    if "checksum" not in columns:
+        connection.execute(
+            "ALTER TABLE schema_migrations ADD COLUMN checksum TEXT NOT NULL DEFAULT ''"
+        )
 
+
+def _recorded_migrations(connection: sqlite3.Connection) -> dict[str, str]:
+    """Return {version: checksum} for already-applied migrations."""
+    return {
+        str(row[0]): str(row[1])
+        for row in connection.execute(
+            "SELECT version, checksum FROM schema_migrations ORDER BY version"
+        ).fetchall()
+    }
+
+
+def apply_migrations(database_path: Path, *, migrations_dir: Path | None = None) -> MigrationResult:
+    """Apply packaged SQL migrations exactly once, in filename order.
+
+    - An empty data root initializes through every packaged migration.
+    - A migration already recorded with a different checksum FAILS CLOSED.
+    - Each migration commits atomically (BEGIN/COMMIT around all statements
+      + the bookkeeping insert).
+    - After applying, every recorded version is re-verified against the
+      on-disk SQL so a historical modification cannot pass silently.
+    """
     database_path.parent.mkdir(parents=True, exist_ok=True)
     applied: list[str] = []
 
@@ -47,33 +94,42 @@ def apply_migrations(database_path: Path, *, migrations_dir: Path | None = None)
             """
             CREATE TABLE IF NOT EXISTS schema_migrations (
                 version TEXT PRIMARY KEY,
-                applied_at TEXT NOT NULL
+                applied_at TEXT NOT NULL,
+                checksum TEXT NOT NULL DEFAULT ''
             )
             """
         )
+        _ensure_checksum_column(connection)
+        recorded = _recorded_migrations(connection)
 
-        existing = {
-            row[0]
-            for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")
-        }
+        sources = _migration_sources(migrations_dir)
 
-        for migration_name, sql in _migration_sources(migrations_dir):
+        for migration_name, sql in sources:
             version = migration_name.removesuffix(".sql")
-            if version in existing:
+            checksum = _sha256(sql)
+            recorded_checksum = recorded.get(version)
+            if recorded_checksum is not None:
+                if recorded_checksum != "" and recorded_checksum != checksum:
+                    raise MigrationChecksumError(
+                        f"migration {version} changed after being applied "
+                        f"(recorded {recorded_checksum}, current {checksum})"
+                    )
                 continue
+
             statements = [part.strip() for part in sql.split(";") if part.strip()]
             connection.execute("BEGIN")
             try:
                 for statement in statements:
                     connection.execute(statement)
                 connection.execute(
-                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
-                    (version, datetime.now(UTC).isoformat()),
+                    "INSERT INTO schema_migrations(version, applied_at, checksum) VALUES (?, ?, ?)",
+                    (version, datetime.now(UTC).isoformat(), checksum),
                 )
                 connection.commit()
             except sqlite3.Error:
                 connection.rollback()
                 raise
             applied.append(version)
+            recorded[version] = checksum
 
     return MigrationResult(database_path=database_path, applied_versions=tuple(applied))

@@ -10,6 +10,7 @@ from iris_memory.acceptance import (
     accept_publication,
 )
 from iris_memory.db import apply_migrations
+from iris_memory.db.migrate import MigrationChecksumError
 
 
 def test_empty_database_initializes_and_is_idempotent(tmp_path: Path) -> None:
@@ -205,3 +206,78 @@ def test_old_0002_schema_upgrades_to_0003_and_consumes_alternate_key(
         },
     )
     assert isinstance(later, IdempotencyConflict)
+
+
+def test_migration_checksum_fails_closed_when_applied_migration_changes(
+    tmp_path: Path,
+) -> None:
+    """A migration modified after being applied must fail closed — the runner
+    must never silently re-run or mask drift."""
+    data_root = tmp_path / "memory"
+    database_path = data_root / "router.sqlite3"
+    migrations_dir = data_root / "migrations"
+    migrations_dir.mkdir(parents=True)
+    (migrations_dir / "0001_first.sql").write_text(
+        "CREATE TABLE t (id INTEGER PRIMARY KEY);",
+        encoding="utf-8",
+    )
+
+    result = apply_migrations(database_path, migrations_dir=migrations_dir)
+    assert result.applied_versions == ("0001_first",)
+
+    # Now modify the already-applied migration's SQL: must fail closed.
+    (migrations_dir / "0001_first.sql").write_text(
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, extra TEXT);",
+        encoding="utf-8",
+    )
+    with pytest.raises(MigrationChecksumError, match="0001_first changed after being applied"):
+        apply_migrations(database_path, migrations_dir=migrations_dir)
+
+
+def test_migration_failure_rolls_back_atomically(tmp_path: Path) -> None:
+    """A failing migration must leave no partial schema — the transaction
+    rolls back the statements AND the bookkeeping insert."""
+    data_root = tmp_path / "memory"
+    database_path = data_root / "router.sqlite3"
+    migrations_dir = data_root / "migrations"
+    migrations_dir.mkdir(parents=True)
+    (migrations_dir / "0001_bad.sql").write_text(
+        "CREATE TABLE ok_table (id INTEGER);\nCREATE TABLE broken (id INTEGER NOT);",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(sqlite3.OperationalError):
+        apply_migrations(database_path, migrations_dir=migrations_dir)
+
+    # The whole migration (including the valid first statement) rolled back.
+    with sqlite3.connect(database_path) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+    assert "ok_table" not in tables, "valid statements before the failure must roll back"
+    assert "schema_migrations" not in tables or "0001_bad" not in {
+        row[0] for row in connection.execute("SELECT version FROM schema_migrations").fetchall()
+    }
+
+
+def test_migration_reapply_is_idempotent_across_restart(tmp_path: Path) -> None:
+    """Restarting the runner after a successful apply is a no-op and keeps the
+    checksum records intact."""
+    data_root = tmp_path / "memory"
+    database_path = data_root / "router.sqlite3"
+    migrations_dir = data_root / "migrations"
+    migrations_dir.mkdir(parents=True)
+    (migrations_dir / "0001_first.sql").write_text(
+        "CREATE TABLE t (id INTEGER PRIMARY KEY);",
+        encoding="utf-8",
+    )
+
+    apply_migrations(database_path, migrations_dir=migrations_dir)
+    second = apply_migrations(database_path, migrations_dir=migrations_dir)
+    assert second.applied_versions == ()
+    with sqlite3.connect(database_path) as connection:
+        checksum = connection.execute(
+            "SELECT checksum FROM schema_migrations WHERE version='0001_first'"
+        ).fetchone()
+    assert checksum is not None and checksum[0] != ""
