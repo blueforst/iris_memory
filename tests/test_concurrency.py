@@ -14,6 +14,7 @@ from typing import Any
 from iris_memory.acceptance import (
     Accepted,
     DuplicateReplay,
+    IdempotencyConflict,
     accept_publication,
 )
 from iris_memory.db import apply_migrations
@@ -383,30 +384,18 @@ def test_same_source_sequence_different_publication_concurrent(tmp_path: Path) -
     assert accepted["ingestion_jobs"] == 1
 
 
-def test_alternate_key_replay_vs_key_reuse_competitive(tmp_path: Path) -> None:
-    """Competition matrix: after P(K1) is accepted, an exact alternate-key
-    replay P(K2) races a different-publication reuse Q(K2) of that same key.
-
-    Legal outcomes (both must be locked):
-      - P(K2) binds first  -> DuplicateReplay(P) + IdempotencyConflict(Q),
-                             accepted publications = 1
-      - Q(K2) binds first  -> Accepted(Q) + IdempotencyConflict(P replay),
-                             accepted publications = 2
-
-    In both cases: one key has exactly one binding, P's original receipt is
-    unchanged, and there is no half-accept or silent overwrite."""
-    database_path = tmp_path / "router.sqlite3"
-    apply_migrations(database_path)
-
-    # Establish the prior state: accept P(K1) first.
-    first = _request()  # publication P with key K1 ("concurrent-key")
-    first_outcome = accept_publication(database_path, first)
-    assert isinstance(first_outcome, Accepted)
-    first_receipt = str(first_outcome.receipt["receiptId"])
-
+def _alt_replay_fixture(
+    tmp_path: Path,
+) -> tuple[Path, dict[str, object], str, dict[str, object], dict[str, object]]:
+    """Build the P(K1) prior state and the two racing requests P(K2) / Q(K2)."""
+    db = tmp_path / "router.sqlite3"
+    apply_migrations(db)
+    first = _request()  # P(K1)
+    out1 = accept_publication(db, first)
+    assert isinstance(out1, Accepted)
+    first_receipt = str(out1.receipt["receiptId"])
     alt_p = dict(first)
     alt_p["idempotencyKey"] = "alt-key-for-pub"  # P(K2): exact alternate replay
-
     reuse_q = dict(first)
     reuse_q["idempotencyKey"] = "alt-key-for-pub"  # Q(K2): same key, different pub
     reuse_q["publication"] = {
@@ -415,45 +404,86 @@ def test_alternate_key_replay_vs_key_reuse_competitive(tmp_path: Path) -> None:
         "sourceSequence": 7,
         "summary": "reuse of alt key with a different publication",
     }
+    return db, first, first_receipt, alt_p, reuse_q
 
-    for attempt in range(8):  # run the race repeatedly to cover both winners
-        db = tmp_path / f"router-race-{attempt}.sqlite3"
-        apply_migrations(db)
-        out1 = accept_publication(db, first)
-        assert isinstance(out1, Accepted)
-        barrier = threading.Barrier(2)
 
-        def run_alt(db_arg: Path = db, barrier_arg: threading.Barrier = barrier) -> str:
-            barrier_arg.wait()
-            return type(accept_publication(db_arg, alt_p)).__name__
+def _assert_invariants(db: Path, first: dict[str, object], first_receipt: str) -> None:
+    """The invariants that hold under BOTH legal outcomes."""
+    with sqlite3.connect(db) as conn:
+        rows = conn.execute(
+            "SELECT COUNT(*) FROM publication_idempotency WHERE idempotency_key = ?",
+            ("alt-key-for-pub",),
+        ).fetchone()
+        assert rows is not None and rows[0] == 1, "alt key must have exactly one binding"
+        p_receipt = conn.execute(
+            "SELECT receipt_id FROM accepted_publications WHERE publication_id = ?",
+            (str(first["publication"]["publicationId"]),),
+        ).fetchone()
+        assert p_receipt is not None
+        assert str(p_receipt[0]) == first_receipt, "P's receipt must be unchanged"
+        receipts = conn.execute("SELECT COUNT(*) FROM acceptance_receipts").fetchone()
+        jobs = conn.execute("SELECT COUNT(*) FROM ingestion_jobs").fetchone()
+        assert receipts is not None and jobs is not None
+        assert receipts[0] == jobs[0], "receipt and job counts must match"
 
-        def run_reuse(db_arg: Path = db, barrier_arg: threading.Barrier = barrier) -> str:
-            barrier_arg.wait()
-            return type(accept_publication(db_arg, reuse_q)).__name__
 
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            results = [f.result() for f in [executor.submit(run_alt), executor.submit(run_reuse)]]
-        statuses = sorted(results)
+def test_alt_key_replay_p_first_deterministic(tmp_path: Path) -> None:
+    """Deterministic P-first: P(K1) -> P(K2) -> Q(K2). P(K2) is an exact
+    alternate-key replay (DuplicateReplay); Q(K2) then conflicts."""
+    db, first, first_receipt, alt_p, reuse_q = _alt_replay_fixture(tmp_path)
+    p_out = accept_publication(db, alt_p)
+    assert isinstance(p_out, DuplicateReplay), type(p_out).__name__
+    q_out = accept_publication(db, reuse_q)
+    assert isinstance(q_out, IdempotencyConflict), type(q_out).__name__
+    counts = _counts(db)
+    assert counts == {
+        "accepted_publications": 1,
+        "publication_idempotency": 2,  # K1 + K2
+        "acceptance_receipts": 1,
+        "ingestion_jobs": 1,
+    }, counts
+    _assert_invariants(db, first, first_receipt)
 
-        if statuses == ["DuplicateReplay", "IdempotencyConflict"]:
-            # P(K2) bound first: exact replay, Q conflicts.
-            assert _counts(db)["accepted_publications"] == 1
-        elif statuses == ["Accepted", "IdempotencyConflict"]:
-            # Q(K2) bound first: Q accepted, P(K2) replay conflicts.
-            assert _counts(db)["accepted_publications"] == 2
-        else:
-            raise AssertionError(f"unexpected race outcome {statuses}")
 
-        # One key -> exactly one binding; P's receipt unchanged in every case.
-        with sqlite3.connect(db) as conn:
-            rows = conn.execute(
-                "SELECT COUNT(*) FROM publication_idempotency WHERE idempotency_key = ?",
-                ("alt-key-for-pub",),
-            ).fetchone()
-            assert rows is not None and rows[0] == 1, "alt key must have exactly one binding"
-            p_receipt = conn.execute(
-                "SELECT receipt_id FROM accepted_publications WHERE publication_id = ?",
-                (str(first["publication"]["publicationId"]),),
-            ).fetchone()
-            assert p_receipt is not None
-            assert str(p_receipt[0]) == first_receipt, "P's receipt must be unchanged"
+def test_alt_key_replay_q_first_deterministic(tmp_path: Path) -> None:
+    """Deterministic Q-first: P(K1) -> Q(K2) -> P(K2). Q(K2) is accepted;
+    P(K2) then conflicts because the key is bound to a different publication."""
+    db, first, first_receipt, alt_p, reuse_q = _alt_replay_fixture(tmp_path)
+    q_out = accept_publication(db, reuse_q)
+    assert isinstance(q_out, Accepted), type(q_out).__name__
+    p_out = accept_publication(db, alt_p)
+    assert isinstance(p_out, IdempotencyConflict), type(p_out).__name__
+    counts = _counts(db)
+    assert counts == {
+        "accepted_publications": 2,  # P + Q
+        "publication_idempotency": 2,  # K1 + K2
+        "acceptance_receipts": 2,
+        "ingestion_jobs": 2,
+    }, counts
+    _assert_invariants(db, first, first_receipt)
+
+
+def test_alt_key_replay_vs_reuse_concurrent_smoke(tmp_path: Path) -> None:
+    """Concurrent smoke: P(K2) replay races Q(K2) reuse. EITHER legal winner
+    is acceptable; every case must preserve the shared invariants."""
+    db, first, first_receipt, alt_p, reuse_q = _alt_replay_fixture(tmp_path)
+    barrier = threading.Barrier(2)
+
+    def run_alt(db_arg: Path = db, barrier_arg: threading.Barrier = barrier) -> str:
+        barrier_arg.wait()
+        return type(accept_publication(db_arg, alt_p)).__name__
+
+    def run_reuse(db_arg: Path = db, barrier_arg: threading.Barrier = barrier) -> str:
+        barrier_arg.wait()
+        return type(accept_publication(db_arg, reuse_q)).__name__
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = [f.result() for f in [executor.submit(run_alt), executor.submit(run_reuse)]]
+    statuses = sorted(results)
+    if statuses == ["DuplicateReplay", "IdempotencyConflict"]:
+        assert _counts(db)["accepted_publications"] == 1
+    elif statuses == ["Accepted", "IdempotencyConflict"]:
+        assert _counts(db)["accepted_publications"] == 2
+    else:
+        raise AssertionError(f"unexpected race outcome {statuses}")
+    _assert_invariants(db, first, first_receipt)

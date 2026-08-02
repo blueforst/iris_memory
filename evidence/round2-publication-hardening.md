@@ -29,18 +29,22 @@ uvx ruff==0.15.22 check .        -> All checks passed!
 uvx ruff==0.15.22 format --check . -> 23 files already formatted
 uvx mypy==2.3.0                  -> Success: no issues found in 15 source files (pyproject [tool.mypy] files=["src"]; tests not in mypy scope, consistent with round 1)
 uv run --with pytest==9.1.1 --with jsonschema==4.26.0 pytest
-                                 -> 38 passed in 1.72s
+                                 -> 40 passed in 1.85s
 ```
 
 Concurrency tests re-run 5x with no flake (default sqlite3 5s busy timeout covers BEGIN IMMEDIATE contention).
 
-The full suite is 38 tests (29 first-round + 9 new hardening tests).
+The full suite is 40 tests (29 first-round + 11 new hardening tests).
 
 Competition matrix added: same key / different payload concurrent (1 Accepted
 + 3 IdempotencyConflict), same publication / different key concurrent (1
 Accepted + 3 exact alternate-key replays + 4 idempotency rows + 1 receipt id),
 same source_sequence / different publication concurrent (1 Accepted + 1
-SequenceConflict), and alternate-key replay vs key reuse competitive. The
+SequenceConflict), and alternate-key replay vs key reuse: two DETERMINISTIC
+order tests (P-first: P(K1)->P(K2)->Q(K2) locks 1 Accepted + replay + conflict;
+Q-first: P(K1)->Q(K2)->P(K2) locks 2 Accepted + conflict) each with exact
+ledger counts and unchanged P receipt, plus one concurrent smoke allowing
+either legal winner. The
 cross-process test imports acceptance BEFORE the ready file, so the common
 ready/start gate opens only after all four processes completed import: this is
 a synchronized post-import start / contention attempt (it does not claim to
