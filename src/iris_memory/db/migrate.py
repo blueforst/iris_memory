@@ -172,6 +172,7 @@ def apply_migrations(database_path: Path, *, migrations_dir: Path | None = None)
         # which backfills EVERY empty row — including migrations applied
         # between 0003 and 0004 that were inserted without a checksum.
         deferred_backfill: list[tuple[str, str]] = []
+        backfilled_any = False
         columns = {
             row[1] for row in connection.execute("PRAGMA table_info(schema_migrations)").fetchall()
         }
@@ -189,10 +190,16 @@ def apply_migrations(database_path: Path, *, migrations_dir: Path | None = None)
                         "UPDATE schema_migrations SET checksum = ? WHERE version = ?",
                         (release_checksum, version),
                     )
+                    backfilled_any = True
                 else:
                     deferred_backfill.append((version, release_checksum))
                 recorded[version] = release_checksum
-        if has_checksum_column and any(v == "" for v in recorded.values()):
+        # review-pass-4 #1: commit whenever a UPDATE actually ran — python
+        # sqlite3 opens an implicit transaction on the first UPDATE, and the
+        # in-memory `recorded` map is already populated with release checksums
+        # so 'any(empty)' would be false and the explicit BEGIN in the
+        # migration loop would collide with the open implicit transaction.
+        if backfilled_any:
             connection.commit()
 
         for migration_name, sql in sources:
@@ -249,18 +256,19 @@ def apply_migrations(database_path: Path, *, migrations_dir: Path | None = None)
             applied.append(version)
             recorded[version] = checksum
 
-            # review-pass-2 #3 + review-pass-3 #1: if this migration
-            # introduced the checksum column (0004), backfill EVERY empty
-            # checksum row in the SAME transaction/run — the deferred legacy
-            # rows AND any migration applied just before 0004 (e.g. 0003)
-            # that was inserted without a checksum because the column did not
-            # exist yet. A single apply_migrations() therefore leaves ALL
+            # review-pass-2 #3 + review-pass-3 #1 + review-pass-4 #1: if this
+            # migration introduced the checksum column (0004), UNCONDITIONALLY
+            # backfill every row whose DB checksum is still '' in the SAME
+            # transaction/run — the deferred legacy rows, migrations applied
+            # just before 0004 (e.g. 0003) that were inserted without a
+            # checksum, AND the 'zero recorded migrations' baseline (old
+            # runner created the table, 0001-0003 apply in this run). The gate
+            # is the DB empty-row query itself, never the in-memory `recorded`
+            # map (which was pre-populated with release checksums) or the
+            # deferred list. A single apply_migrations() therefore leaves ALL
             # historical checksums non-empty; a crash between the 0004 commit
-            # and this backfill is deterministically completed by the next
-            # run (empty rows are re-backfilled from the manifest).
-            if version == "0004_checksum_metadata" and (
-                deferred_backfill or any(v == "" for v in recorded.values())
-            ):
+            # and this backfill is deterministically completed by the next run.
+            if version == "0004_checksum_metadata":
                 # Backfill EVERY row whose DB checksum is still '' (the
                 # deferred legacy rows AND migrations applied in this run
                 # before the column existed, e.g. 0003). Read the DB value —

@@ -37,7 +37,7 @@ uv run --with jsonschema==4.26.0 iris-memory contract verify --manifest artifact
 ```
 
 Result: artifact written; manifestSha256 =
-`e0a0983958d75a755b0c717e0e2ea38280829ceb3c961b6b6865d4afb631594f`.
+`2cb22deb5efded5a112dbb38c19506e6185ad328a973f7a96d9e66faf59a761b` (contract 0.1.1, capability-handshake-v2).
 Build is byte-reproducible (two builds diff as identical). CI gains an
 `artifact` job that builds into `$RUNNER_TEMP` and verifies the unpacked
 artifact in place, plus a byte-reproducibility diff.
@@ -108,16 +108,19 @@ uvx ruff==0.15.22 check .           -> All checks passed!
 uvx ruff==0.15.22 format --check .  -> 25 files already formatted
 uvx mypy==2.3.0                     -> Success: no issues found in 17 source files
 uv run --with pytest==9.1.1 --with jsonschema==4.26.0 pytest
-                                    -> 57 passed (40 round-2 + 9 artifact
-                                       + 5 service + 3 migration checksum)
+                                    -> 69 passed (40 round-2 + 9 artifact
+                                       + 9 service + 8 migrations + 3 process)
 ```
 
-New tests: `tests/test_artifact.py` (9), `tests/test_service.py` (5), and 3
-migration checksum/reliability tests appended to `tests/test_migrations.py`.
+New tests: `tests/test_artifact.py` (9), `tests/test_service.py` (9, incl.
+schema-validated handshake + 501 bodies), `tests/test_migrations.py` (8, incl.
+release-manifest strict checks and single-apply legacy backfill), and
+`tests/test_service_process.py` (3, real serve subprocess incl. graceful
+shutdown exit-code assertion).
 
 ## Cross-repo compatibility
 
-The built artifact (manifest + 13 schemas + 28 fixtures + OpenAPI) is
+The built artifact (manifest + 14 schemas + 30 fixtures + OpenAPI, contract 0.1.1 / capability-handshake-v2) is
 committed in the iris-agent repo under `fixtures/memory-contracts-artifact/`
 for the agent-side compatibility gate (manifest hash recomputation, schema/
 fixture list agreement, valid/invalid fixture agreement, major-version

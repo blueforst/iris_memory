@@ -347,10 +347,14 @@ def verify_artifact_directory(root: Path) -> tuple[bool, tuple[str, ...]]:
     #     directories, no extra files, no symlinks (flat layout is verified).
     extra: list[str] = []
     for path in root.iterdir():
-        if path.name == "manifest.json":
-            continue
+        # review-pass-4 #2: a symlink is rejected REGARDLESS of its name —
+        # even a root `manifest.json` symlink (pointing outside the artifact)
+        # breaks the 'self-contained, no symlink' guarantee. Only a REGULAR
+        # file named manifest.json is allowed.
         if path.is_symlink():
             extra.append(f"{path.name} (symlink)")
+            continue
+        if path.name == "manifest.json":
             continue
         if path.is_file():
             extra.append(path.name)

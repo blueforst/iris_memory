@@ -406,7 +406,11 @@ def test_legacy_baselines_backfill_all_checksums_in_one_apply(tmp_path: Path) ->
     }
     baseline_order = ["0001_bootstrap", "0002_router_ledger", "0003_router_idempotency_rebuild"]
 
-    for stop in (1, 2, 3):
+    # review-pass-4 #1: also cover the 'zero recorded migrations' baseline —
+    # the old runner created schema_migrations (no checksum column) but no
+    # migration row exists yet (stop = 0). 0001-0003 apply in this run without
+    # a column and must ALL be backfilled after 0004.
+    for stop in (0, 1, 2, 3):
         data_root = tmp_path / f"baseline_{stop}"
         database_path = data_root / "router.sqlite3"
         data_root.mkdir(parents=True)
