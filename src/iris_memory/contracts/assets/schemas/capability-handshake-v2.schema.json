@@ -42,20 +42,35 @@
     "contractVersions": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["major", "minor"],
+      "required": [
+        "major",
+        "minor"
+      ],
       "properties": {
-        "major": { "type": "integer" },
-        "minor": { "type": "integer" }
+        "major": {
+          "type": "integer"
+        },
+        "minor": {
+          "type": "integer"
+        }
       }
     },
-    "supportedMajor": { "type": "integer" },
-    "supportedMinor": { "type": "integer" },
+    "supportedMajor": {
+      "type": "integer"
+    },
+    "supportedMinor": {
+      "type": "integer"
+    },
     "manifestSha256": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
-    "schemaCount": { "type": "integer" },
-    "fixtureCount": { "type": "integer" },
+    "schemaCount": {
+      "type": "integer"
+    },
+    "fixtureCount": {
+      "type": "integer"
+    },
     "capabilities": {
       "type": "array",
       "uniqueItems": true,
@@ -84,12 +99,27 @@
       "const": "not_configured"
     },
     "readiness": {
-      "enum": ["bootstrap", "not_ready", "ready", "degraded"]
+      "enum": [
+        "bootstrap",
+        "not_ready",
+        "ready",
+        "degraded"
+      ]
     },
     "degradedReasons": {
       "type": "array",
       "uniqueItems": true,
-      "items": { "type": "string" }
+      "items": {
+        "type": "string"
+      }
+    },
+    "supportedMinors": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "minItems": 1
     }
   }
 }

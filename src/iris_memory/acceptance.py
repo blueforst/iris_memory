@@ -16,9 +16,11 @@ from iris_memory.contracts.validation import validate_instance
 from iris_memory.db import apply_migrations
 
 SUPPORTED_MAJOR = 0
-SUPPORTED_MINOR = 1
+SUPPORTED_MINORS = (1, 2)
 _REQUEST_SCHEMA = "publication-acceptance-request-v1.schema.json"
 _PUBLICATION_SCHEMA = "historian-publication-v1.schema.json"
+_REQUEST_SCHEMA_V2 = "publication-acceptance-request-v2.schema.json"
+_PUBLICATION_SCHEMA_V2 = "historian-publication-v2.schema.json"
 _SEMVER_PATTERN = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 
 
@@ -155,8 +157,12 @@ def _build_unsupported_error(contract_version: str) -> dict[str, object]:
         "error": "unsupported_contract_version",
         "contractVersion": contract_version,
         "supportedMajor": SUPPORTED_MAJOR,
-        "supportedMinor": SUPPORTED_MINOR,
-        "message": (f"contract {contract_version} is outside the supported 0.1.x wire contract"),
+        "supportedMinor": max(SUPPORTED_MINORS),
+        "supportedMinors": list(SUPPORTED_MINORS),
+        "message": (
+            f"contract {contract_version} is outside the supported "
+            f"0.{'/'.join(str(m) for m in SUPPORTED_MINORS)}.x wire contract"
+        ),
     }
 
 
@@ -188,31 +194,110 @@ def _load_stored_receipt(
     return cast(dict[str, object], json.loads(row[0]))
 
 
+def _validate_v2_provenance(publication: object) -> tuple[str, ...]:
+    """Structural provenance invariants for historian-publication-v2 (iris_memory#6).
+
+    - derivedOnly publications must not claim new supporting Evidence
+      (anti-echo: assistant restatements of memory/compartment/work/source
+      refs cannot independently produce new Evidence);
+    - evidenceCount must equal the number of include-disposition basis refs;
+    - contextRange must be monotonic (from <= to) and non-empty;
+    - include basis refs must carry runtimeEventId (stable attribution).
+    """
+    publication_dict = cast(dict[str, object], publication)
+    errors: list[str] = []
+
+    context_range = cast(dict[str, object], publication_dict["contextRange"])
+    from_seq = cast(int, context_range["fromContextSeq"])
+    to_seq = cast(int, context_range["toContextSeq"])
+    if from_seq > to_seq:
+        errors.append("contextRange.fromContextSeq must be <= toContextSeq")
+    if to_seq < 1:
+        errors.append("contextRange.toContextSeq must be >= 1")
+
+    basis = cast(list[object], publication_dict["evidenceBasis"])
+    include_count = 0
+    for item in basis:
+        ref = cast(dict[str, object], item)
+        disposition = str(ref.get("historianDisposition", ""))
+        if disposition == "include":
+            include_count += 1
+            if not str(ref.get("runtimeEventId", "")).strip():
+                errors.append("include basis ref must carry runtimeEventId")
+
+        if disposition == "exclude" and ref.get("derivationRefs") is None:
+            # exclude must not enter the analysis basis; it may appear only as
+            # derivation/suppression context, never as a supporting ref.
+            errors.append("exclude basis ref must carry derivationRefs (suppression context)")
+
+    declared_count = cast(int, publication_dict["evidenceCount"])
+    if declared_count != include_count:
+        errors.append(
+            f"evidenceCount {declared_count} != include basis count {include_count} "
+            "(reference_only/exclude never increase evidence count)"
+        )
+
+    derived_only = bool(publication_dict["derivedOnly"])
+    if derived_only and include_count > 0:
+        errors.append(
+            "derivedOnly publication must not carry include-disposition basis refs "
+            "(derived-only content cannot produce new Evidence)"
+        )
+
+    return tuple(errors)
+
+
 def accept_publication(database_path: Path, request: object) -> AcceptanceOutcome:
-    """Validate, deduplicate and atomically accept one HistorianPublication."""
-    request_valid, request_errors = validate_instance(_REQUEST_SCHEMA, request)
-    if not request_valid:
-        return ValidationFailure(status="validation_failed", errors=request_errors)
+    """Validate, deduplicate and atomically accept one HistorianPublication.
 
-    request_dict = cast(dict[str, object], request)
-    publication = request_dict["publication"]
-    publication_valid, publication_errors = validate_instance(_PUBLICATION_SCHEMA, publication)
-    if not publication_valid:
-        return ValidationFailure(status="validation_failed", errors=publication_errors)
-
-    contract_version = str(request_dict["contractVersion"])
+    Schema dispatch is driven by contractVersion: 0.1.x validates against the
+    immutable v1 schemas; 0.2.x (iris_memory#6) validates against the v2
+    schemas and the structural provenance invariants. A request whose
+    schemaVersion disagrees with its contractVersion fails closed.
+    """
+    request_dict_peek = cast(dict[str, object], request)
+    contract_version = str(request_dict_peek.get("contractVersion", ""))
     parsed = _parse_version(contract_version)
-    if parsed is None or parsed[0] != SUPPORTED_MAJOR or parsed[1] != SUPPORTED_MINOR:
+    if parsed is None:
+        # Malformed/missing version is a validation failure, not a version
+        # negotiation issue (v1 semantics preserved).
+        return ValidationFailure(
+            status="validation_failed",
+            errors=(f"contractVersion must be a canonical semver, got {contract_version!r}",),
+        )
+    if parsed[0] != SUPPORTED_MAJOR or parsed[1] not in SUPPORTED_MINORS:
         return UnsupportedVersion(
             status="unsupported_contract_version",
             error=_build_unsupported_error(contract_version),
         )
 
-    publication_dict = cast(dict[str, object], publication)
+    if parsed[1] == 2:
+        request_valid, request_errors = validate_instance(_REQUEST_SCHEMA_V2, request)
+        if not request_valid:
+            return ValidationFailure(status="validation_failed", errors=request_errors)
+        publication = cast(dict[str, object], request_dict_peek["publication"])
+        publication_valid, publication_errors = validate_instance(
+            _PUBLICATION_SCHEMA_V2, publication
+        )
+        if not publication_valid:
+            return ValidationFailure(status="validation_failed", errors=publication_errors)
+        provenance_errors = _validate_v2_provenance(publication)
+        if provenance_errors:
+            return ValidationFailure(status="validation_failed", errors=provenance_errors)
+    else:
+        request_valid, request_errors = validate_instance(_REQUEST_SCHEMA, request)
+        if not request_valid:
+            return ValidationFailure(status="validation_failed", errors=request_errors)
+        publication = cast(dict[str, object], request_dict_peek["publication"])
+        publication_valid, publication_errors = validate_instance(_PUBLICATION_SCHEMA, publication)
+        if not publication_valid:
+            return ValidationFailure(status="validation_failed", errors=publication_errors)
+
+    publication_dict = publication
     publication_id = str(publication_dict["publicationId"])
     source_sequence = cast(int, publication_dict["sourceSequence"])
     canonical_hash = _sha256(publication_dict)
-    idempotency_key = str(request_dict["idempotencyKey"])
+    idempotency_key = str(request_dict_peek["idempotencyKey"])
 
     apply_migrations(database_path)
 

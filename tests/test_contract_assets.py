@@ -34,6 +34,18 @@ def test_all_manifest_schemas_are_valid_draft2020() -> None:
         Draft202012Validator.check_schema(schema)
 
 
+def _schema_registry():
+    from referencing import Registry, Resource
+
+    resources = {}
+    for relative in _manifest()["schemas"]:
+        schema = _read(relative)
+        schema_id = str(schema.get("$id", ""))
+        if schema_id:
+            resources[schema_id] = Resource.from_contents(schema)
+    return Registry(resources=resources)
+
+
 def test_manifest_fixtures_validate_or_fail_as_expected() -> None:
     for relative in _manifest()["fixtures"]:
         name = relative.rsplit("/", 1)[-1]
@@ -41,7 +53,9 @@ def test_manifest_fixtures_validate_or_fail_as_expected() -> None:
         schema_name = name.split(".valid.")[0] if ".valid." in name else name.split(".invalid")[0]
         schema = _read(f"schemas/{schema_name}.schema.json")
         instance = _read(relative)
-        validator = Draft202012Validator(schema, format_checker=FormatChecker())
+        validator = Draft202012Validator(
+            schema, format_checker=FormatChecker(), registry=_schema_registry()
+        )
         errors = list(validator.iter_errors(instance))
         if ".valid." in name:
             assert not errors, f"{relative} should be valid: {errors}"
