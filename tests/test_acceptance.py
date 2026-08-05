@@ -590,6 +590,7 @@ def test_v2_acceptance_stores_version_and_v1_rows_stay_unfabricated(tmp_path: Pa
 
 # --- iris_memory#6 review: non-object bodies must fail cleanly ---------------
 
+
 def test_non_dict_request_body_fails_closed(tmp_path: Path) -> None:
     """A non-object body (array/scalar/null) must be a clean validation
     failure, never an unhandled AttributeError (review BLOCKING)."""
