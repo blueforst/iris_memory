@@ -586,3 +586,15 @@ def test_v2_acceptance_stores_version_and_v1_rows_stay_unfabricated(tmp_path: Pa
     parsed = json.loads(payload)
     assert "contextRange" not in parsed, "legacy v1 row must not be retrofitted with provenance"
     assert "evidenceBasis" not in parsed, "legacy v1 row must not be retrofitted with basis refs"
+
+
+# --- iris_memory#6 review: non-object bodies must fail cleanly ---------------
+
+def test_non_dict_request_body_fails_closed(tmp_path: Path) -> None:
+    """A non-object body (array/scalar/null) must be a clean validation
+    failure, never an unhandled AttributeError (review BLOCKING)."""
+    database_path = tmp_path / "router.sqlite3"
+    for bad in ([], "x", None, 42):
+        outcome = accept_publication(database_path, bad)
+        assert isinstance(outcome, ValidationFailure), f"{bad!r} must be ValidationFailure"
+        assert any("JSON object" in e for e in outcome.errors)

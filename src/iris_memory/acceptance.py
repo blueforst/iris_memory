@@ -255,6 +255,14 @@ def accept_publication(database_path: Path, request: object) -> AcceptanceOutcom
     schemas and the structural provenance invariants. A request whose
     schemaVersion disagrees with its contractVersion fails closed.
     """
+    if not isinstance(request, dict):
+        # Shape guard BEFORE version parsing: a non-object body (array,
+        # scalar, null) must fail as a clean validation_failed, never as an
+        # unhandled AttributeError that breaks the HTTP connection.
+        return ValidationFailure(
+            status="validation_failed",
+            errors=("request body must be a JSON object",),
+        )
     request_dict_peek = cast(dict[str, object], request)
     contract_version = str(request_dict_peek.get("contractVersion", ""))
     parsed = _parse_version(contract_version)

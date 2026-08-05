@@ -76,3 +76,29 @@ def test_http_health_and_publication_acceptance(tmp_path: Path) -> None:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_http_non_object_body_returns_400(tmp_path: Path) -> None:
+    """POST []/null must return a clean 400 validation_failed, not a
+    dropped connection (review BLOCKING regression)."""
+    database_path = tmp_path / "router.sqlite3"
+    server, thread = _start_server(database_path)
+    try:
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+        for bad in ("[]", "null", '"x"'):
+            connection.request(
+                "POST",
+                "/historian/publications",
+                body=bad,
+                headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            assert response.status == 400, f"{bad!r} must be 400, got {response.status}"
+            payload = json.loads(response.read().decode("utf-8"))
+            assert isinstance(payload["errors"], list)
+            assert any("JSON object" in e for e in payload["errors"])
+        connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
