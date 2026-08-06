@@ -215,6 +215,21 @@ def verify_manifest(manifest: dict[str, object]) -> tuple[bool, tuple[str, ...]]
     return (not errors, tuple(errors))
 
 
+def _schema_registry() -> object:
+    """Registry of packaged schemas keyed by $id, so cross-file urn: $refs
+    (v2 provenance schemas) resolve inside fixture validation."""
+    from referencing import Registry, Resource  # type: ignore[import-not-found]
+
+    resources: dict[str, Resource] = {}
+    for relative in scan_schemas():
+        with contract_asset(*relative.split("/")) as path:
+            schema = json.loads(path.read_text(encoding="utf-8"))
+        schema_id = str(schema.get("$id", ""))
+        if schema_id:
+            resources[schema_id] = Resource.from_contents(schema)
+    return Registry(resources=resources)
+
+
 def validate_fixtures(manifest: dict[str, object]) -> tuple[bool, tuple[str, ...]]:
     """Re-validate every valid/invalid fixture against its schema.
 
@@ -242,7 +257,9 @@ def validate_fixtures(manifest: dict[str, object]) -> tuple[bool, tuple[str, ...
             schema = json.loads(schema_path.read_text(encoding="utf-8"))
         with contract_asset("fixtures", name) as fixture_path:
             instance = json.loads(fixture_path.read_text(encoding="utf-8"))
-        validator = Draft202012Validator(schema, format_checker=FormatChecker())
+        validator = Draft202012Validator(
+            schema, format_checker=FormatChecker(), registry=_schema_registry()
+        )
         validation_errors = list(validator.iter_errors(instance))
         if expect_valid and validation_errors:
             errors.append(f"{relative} should be valid but failed: {validation_errors}")
@@ -425,10 +442,22 @@ def verify_artifact_directory(root: Path) -> tuple[bool, tuple[str, ...]]:
             continue
         try:
             from jsonschema import Draft202012Validator, FormatChecker
+            from referencing import Registry, Resource
 
             schema = json.loads(schema_path.read_text(encoding="utf-8"))
             instance = json.loads(fixture_path.read_text(encoding="utf-8"))
-            validator = Draft202012Validator(schema, format_checker=FormatChecker())
+            # Register every schema in this artifact directory by $id so v2
+            # cross-file urn: refs resolve.
+            resources: dict[str, Resource] = {}
+            for schema_file in (root / "schemas").glob("*.schema.json"):
+                s = json.loads(schema_file.read_text(encoding="utf-8"))
+                schema_id = str(s.get("$id", ""))
+                if schema_id:
+                    resources[schema_id] = Resource.from_contents(s)
+            registry = Registry(resources=resources)
+            validator = Draft202012Validator(
+                schema, format_checker=FormatChecker(), registry=registry
+            )
             validation_errors = list(validator.iter_errors(instance))
         except Exception as exc:  # noqa: BLE001 - any failure is a verifier error
             fixture_errors.append(f"fixture {relative} validation failed: {exc}")

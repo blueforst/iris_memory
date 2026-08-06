@@ -64,9 +64,10 @@ def test_v1_health_and_capabilities(tmp_path: Path) -> None:
         assert response.status == 200
         caps = json.loads(response.read().decode("utf-8"))
         assert caps["schemaVersion"] == "capability-handshake-v2"
-        assert caps["contractVersion"] == "0.1.1"
+        assert caps["contractVersion"] == "0.2.0"
         assert caps["supportedMajor"] == 0
-        assert caps["supportedMinor"] == 1
+        assert caps["supportedMinor"] == 2
+        assert caps["supportedMinors"] == [1, 2]
         assert "publication.accept" in caps["capabilities"]
         assert "graphiti.ingest" in caps["unavailableCapabilities"]
         assert "recall" in caps["unavailableCapabilities"]

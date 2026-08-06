@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -296,7 +297,8 @@ def test_unsupported_major_version_fails_closed(tmp_path: Path) -> None:
 
     assert isinstance(outcome, UnsupportedVersion)
     assert outcome.error["supportedMajor"] == 0
-    assert outcome.error["supportedMinor"] == 1
+    assert outcome.error["supportedMinor"] == 2
+    assert outcome.error["supportedMinors"] == [1, 2]
     apply_migrations(database_path)
     assert _counts(database_path) == {
         "accepted_publications": 0,
@@ -381,3 +383,219 @@ def test_health_is_bootstrap_before_migration_and_degraded_after(
     assert build_health_report(database_path).status == "bootstrap"
     apply_migrations(database_path)
     assert build_health_report(database_path).status == "degraded"
+
+
+# --- iris_memory#6: v2 provenance validation matrix ---------------------------
+
+
+def _publication_v2(
+    *,
+    publication_id: str = PUBLICATION_ID,
+    source_sequence: int = 1,
+    derived_only: bool = False,
+    basis: list[dict[str, Any]] | None = None,
+    evidence_count: int | None = None,
+    from_seq: int = 1,
+    to_seq: int = 4,
+) -> dict[str, Any]:
+    effective_basis = (
+        basis
+        if basis is not None
+        else [
+            {
+                "contextUnitId": "input-e-1",
+                "contextSeq": 1,
+                "runtimeEventId": "evt-1",
+                "contentHash": HASH_64,
+                "historianDisposition": "include",
+            }
+        ]
+    )
+    return {
+        "schemaVersion": "historian-publication-v2",
+        "publicationId": publication_id,
+        "sourceSequence": source_sequence,
+        "publishedAt": "2026-08-05T00:00:00Z",
+        "payloadHash": HASH_64,
+        "contextRange": {
+            "contextLineageId": "identity-0123456789abcdef",
+            "fromContextSeq": from_seq,
+            "toContextSeq": to_seq,
+            "rangeHash": HASH_64,
+        },
+        "semanticSourceVersion": "context-unit-v1",
+        "compartmentCount": 1,
+        "segmentCount": 1,
+        "evidenceCount": evidence_count if evidence_count is not None else len(effective_basis),
+        "evidenceBasis": effective_basis,
+        "derivedOnly": derived_only,
+        "summary": "v2 publication",
+    }
+
+
+def _request_v2(
+    *,
+    idempotency_key: str = "v2-run-001",
+    publication: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "schemaVersion": "publication-acceptance-request-v2",
+        "contractVersion": "0.2.0",
+        "idempotencyKey": idempotency_key,
+        "publication": publication if publication is not None else _publication_v2(),
+    }
+
+
+def test_v2_publication_accepts_with_full_provenance(tmp_path: Path) -> None:
+    outcome = accept_publication(tmp_path / "router.sqlite3", _request_v2())
+    assert isinstance(outcome, Accepted)
+
+
+def test_v2_evidence_count_mismatch_fails_closed(tmp_path: Path) -> None:
+    publication = _publication_v2(
+        basis=[
+            {
+                "contextUnitId": "a",
+                "contextSeq": 1,
+                "runtimeEventId": "evt-1",
+                "contentHash": HASH_64,
+                "historianDisposition": "include",
+            },
+            {
+                "contextUnitId": "b",
+                "contextSeq": 2,
+                "runtimeEventId": "evt-2",
+                "contentHash": HASH_64,
+                "historianDisposition": "reference_only",
+            },
+        ],
+        evidence_count=2,  # reference_only must NOT count
+    )
+    outcome = accept_publication(tmp_path / "router.sqlite3", _request_v2(publication=publication))
+    assert isinstance(outcome, ValidationFailure)
+    assert any("evidenceCount" in e and "include basis count" in e for e in outcome.errors)
+
+
+def test_v2_derived_only_cannot_claim_new_evidence(tmp_path: Path) -> None:
+    publication = _publication_v2(derived_only=True, evidence_count=1)
+    outcome = accept_publication(tmp_path / "router.sqlite3", _request_v2(publication=publication))
+    assert isinstance(outcome, ValidationFailure)
+    assert any("derivedOnly" in e for e in outcome.errors)
+
+
+def test_v2_derived_only_with_only_derivation_refs_accepts(tmp_path: Path) -> None:
+    publication = _publication_v2(
+        derived_only=True,
+        evidence_count=0,
+        basis=[
+            {
+                "contextUnitId": "recall-e-3",
+                "contextSeq": 3,
+                "runtimeEventId": "evt-3",
+                "contentHash": HASH_64,
+                "historianDisposition": "exclude",
+                "derivationRefs": {
+                    "memoryRefs": ["mem-1"],
+                    "compartmentIds": [],
+                    "sourceContextUnitIds": ["input-e-1"],
+                },
+            }
+        ],
+    )
+    outcome = accept_publication(tmp_path / "router.sqlite3", _request_v2(publication=publication))
+    assert isinstance(outcome, Accepted)
+
+
+def test_v2_inverted_context_range_fails_closed(tmp_path: Path) -> None:
+    publication = _publication_v2(from_seq=4, to_seq=1)
+    outcome = accept_publication(tmp_path / "router.sqlite3", _request_v2(publication=publication))
+    assert isinstance(outcome, ValidationFailure)
+    assert any("contextRange" in e for e in outcome.errors)
+
+
+def test_v2_include_basis_without_runtime_event_id_fails_closed(tmp_path: Path) -> None:
+    publication = _publication_v2(
+        basis=[
+            {
+                "contextUnitId": "a",
+                "contextSeq": 1,
+                "contentHash": HASH_64,
+                "historianDisposition": "include",
+            }
+        ]
+    )
+    outcome = accept_publication(tmp_path / "router.sqlite3", _request_v2(publication=publication))
+    assert isinstance(outcome, ValidationFailure)
+    assert any("runtimeEventId" in e for e in outcome.errors)
+
+
+def test_v2_replay_returns_duplicate_receipt(tmp_path: Path) -> None:
+    database_path = tmp_path / "router.sqlite3"
+    first = accept_publication(database_path, _request_v2(idempotency_key="replay-key"))
+    assert isinstance(first, Accepted)
+    second = accept_publication(database_path, _request_v2(idempotency_key="replay-key"))
+    assert isinstance(second, DuplicateReplay)
+
+
+def test_v2_reused_key_with_changed_provenance_conflicts(tmp_path: Path) -> None:
+    database_path = tmp_path / "router.sqlite3"
+    first = accept_publication(database_path, _request_v2(idempotency_key="mut-key"))
+    assert isinstance(first, Accepted)
+    changed = _publication_v2(to_seq=5)  # different context range => different hash
+    second = accept_publication(
+        database_path, _request_v2(idempotency_key="mut-key", publication=changed)
+    )
+    assert isinstance(second, IdempotencyConflict)
+
+
+# --- iris_memory#6: legacy rows keep their original contract version ----------
+
+
+def test_v2_acceptance_stores_version_and_v1_rows_stay_unfabricated(tmp_path: Path) -> None:
+    """Legacy 0.1.x rows keep their original contract version; nothing invents
+    contextUnitId/rangeHash/derivationRefs for them; v2 rows are tagged 0.2.0."""
+    database_path = tmp_path / "router.sqlite3"
+    v1_outcome = accept_publication(database_path, _request(contract_version="0.1.0"))
+    assert isinstance(v1_outcome, Accepted)
+    v2_outcome = accept_publication(
+        database_path,
+        _request_v2(
+            idempotency_key="v2-legacy-key",
+            publication=_publication_v2(
+                publication_id="22222222-3333-4444-8555-666666666666",
+                source_sequence=2,
+            ),
+        ),
+    )
+    assert isinstance(v2_outcome, Accepted)
+
+    with sqlite3.connect(database_path) as connection:
+        rows = connection.execute(
+            "SELECT publication_id, contract_version FROM accepted_publications "
+            "ORDER BY source_sequence"
+        ).fetchall()
+    assert len(rows) == 2
+    assert rows[0][1] == "0.1.0", "v1 row must keep its original contract version"
+    assert rows[1][1] == "0.2.0", "v2 row must be tagged 0.2.0"
+    # The v1 payload JSON must not have gained provenance fields (no fabrication).
+    with sqlite3.connect(database_path) as connection:
+        payload = connection.execute(
+            "SELECT payload_json FROM accepted_publications WHERE publication_id = ?",
+            (rows[0][0],),
+        ).fetchone()[0]
+    parsed = json.loads(payload)
+    assert "contextRange" not in parsed, "legacy v1 row must not be retrofitted with provenance"
+    assert "evidenceBasis" not in parsed, "legacy v1 row must not be retrofitted with basis refs"
+
+
+# --- iris_memory#6 review: non-object bodies must fail cleanly ---------------
+
+
+def test_non_dict_request_body_fails_closed(tmp_path: Path) -> None:
+    """A non-object body (array/scalar/null) must be a clean validation
+    failure, never an unhandled AttributeError (review BLOCKING)."""
+    database_path = tmp_path / "router.sqlite3"
+    for bad in ([], "x", None, 42):
+        outcome = accept_publication(database_path, bad)
+        assert isinstance(outcome, ValidationFailure), f"{bad!r} must be ValidationFailure"
+        assert any("JSON object" in e for e in outcome.errors)

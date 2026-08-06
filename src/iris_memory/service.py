@@ -32,6 +32,8 @@ from pathlib import Path
 from typing import Any
 
 from iris_memory.acceptance import (
+    SUPPORTED_MAJOR,
+    SUPPORTED_MINORS,
     Accepted,
     DuplicateReplay,
     IdempotencyConflict,
@@ -45,9 +47,6 @@ from iris_memory.contracts.artifact import build_artifact_manifest
 from iris_memory.contracts.manifest import CONTRACT_PACKAGE
 from iris_memory.db import apply_migrations
 from iris_memory.health import build_health_report
-
-SUPPORTED_MAJOR = 0
-SUPPORTED_MINOR = 1
 
 _AVAILABLE_CAPABILITIES = (
     "publication.accept",
@@ -197,9 +196,10 @@ def build_capabilities() -> dict[str, object]:
         "serviceName": "iris-memory",
         "contractPackage": CONTRACT_PACKAGE.name,
         "contractVersion": CONTRACT_PACKAGE.version,
-        "contractVersions": {"major": SUPPORTED_MAJOR, "minor": SUPPORTED_MINOR},
+        "contractVersions": {"major": SUPPORTED_MAJOR, "minor": max(SUPPORTED_MINORS)},
         "supportedMajor": SUPPORTED_MAJOR,
-        "supportedMinor": SUPPORTED_MINOR,
+        "supportedMinor": max(SUPPORTED_MINORS),
+        "supportedMinors": list(SUPPORTED_MINORS),
         "manifestSha256": manifest["manifestSha256"],
         "schemaCount": manifest["schemaCount"],
         "fixtureCount": manifest["fixtureCount"],
