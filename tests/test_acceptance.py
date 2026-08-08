@@ -297,8 +297,8 @@ def test_unsupported_major_version_fails_closed(tmp_path: Path) -> None:
 
     assert isinstance(outcome, UnsupportedVersion)
     assert outcome.error["supportedMajor"] == 0
-    assert outcome.error["supportedMinor"] == 2
-    assert outcome.error["supportedMinors"] == [1, 2]
+    assert outcome.error["supportedMinor"] == 3
+    assert outcome.error["supportedMinors"] == [1, 2, 3]
     apply_migrations(database_path)
     assert _counts(database_path) == {
         "accepted_publications": 0,

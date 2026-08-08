@@ -6,6 +6,7 @@
     "0001_bootstrap": "987a12aca9b7cfb01ed8e5e3df7c77d4bc9e14ab8c9804d69cc4051aded6bb1a",
     "0002_router_ledger": "6cfc976d3d32e871a9e42cdcdb64876836540a969cd0f0b33195ef99f744bfb0",
     "0003_router_idempotency_rebuild": "4c2f01f1ab51087fa6cf49695d5f174c8fe8e98b80b265aba470881e772ab46c",
-    "0004_checksum_metadata": "db823e20b24930cddfc30e1908b55208566b870721cb1496bafbb06b410611b1"
+    "0004_checksum_metadata": "db823e20b24930cddfc30e1908b55208566b870721cb1496bafbb06b410611b1",
+    "0005_episode_sources": "fd6b738c314dc867c40ed29117461cc11e7f676769bbbfaafd43507ed28e781b"
   }
 }

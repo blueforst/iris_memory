@@ -115,7 +115,7 @@ def build_artifact_manifest() -> dict[str, object]:
         "package": CONTRACT_PACKAGE.name,
         "version": CONTRACT_PACKAGE.version,
         "majorVersion": CONTRACT_PACKAGE.major_version,
-        "status": "candidate_v1",
+        "status": CONTRACT_PACKAGE.status,
         "authority": {
             "schemas": "authoritative",
             "openapi": "candidate_descriptive",

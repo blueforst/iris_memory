@@ -14,6 +14,7 @@ def test_cli_migrate_then_check(tmp_path: Path, capsys: object) -> None:
         "0002_router_ledger",
         "0003_router_idempotency_rebuild",
         "0004_checksum_metadata",
+        "0005_episode_sources",
     ]
 
     assert main(["check", "--data-root", str(data_root)]) == 0

@@ -3,14 +3,14 @@
   "serviceName": "iris-memory",
   "serviceVersion": "0.1.0",
   "contractPackage": "iris-memory-contracts",
-  "contractVersion": "0.2.0",
+  "contractVersion": "0.3.0",
   "contractVersions": {
     "major": 0,
-    "minor": 1
+    "minor": 3
   },
   "supportedMajor": 0,
-  "supportedMinor": 1,
-  "manifestSha256": "e0a0983958d75a755b0c717e0e2ea38280829ceb3c961b6b6865d4afb631594f",
+  "supportedMinor": 3,
+  "manifestSha256": "0000000000000000000000000000000000000000000000000000000000000000",
   "schemaCount": 13,
   "fixtureCount": 28,
   "capabilities": [

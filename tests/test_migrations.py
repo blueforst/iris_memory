@@ -24,6 +24,7 @@ def test_empty_database_initializes_and_is_idempotent(tmp_path: Path) -> None:
         "0002_router_ledger",
         "0003_router_idempotency_rebuild",
         "0004_checksum_metadata",
+        "0005_episode_sources",
     )
     assert second.applied_versions == ()
 
@@ -44,6 +45,7 @@ def test_empty_database_initializes_and_is_idempotent(tmp_path: Path) -> None:
         ("0002_router_ledger",),
         ("0003_router_idempotency_rebuild",),
         ("0004_checksum_metadata",),
+        ("0005_episode_sources",),
     ]
     assert state == ("ledger_initialized",)
     assert {
@@ -172,6 +174,7 @@ def test_old_0002_schema_upgrades_to_0003_and_consumes_alternate_key(
     assert result.applied_versions == (
         "0003_router_idempotency_rebuild",
         "0004_checksum_metadata",
+        "0005_episode_sources",
     )
 
     with sqlite3.connect(database_path) as connection:
@@ -454,6 +457,7 @@ def test_legacy_baselines_backfill_all_checksums_in_one_apply(tmp_path: Path) ->
             "0002_router_ledger",
             "0003_router_idempotency_rebuild",
             "0004_checksum_metadata",
+            "0005_episode_sources",
         ]
         for version, checksum in rows:
             assert checksum != "", f"{version} checksum must be non-empty after ONE apply"
